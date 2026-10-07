@@ -8,6 +8,7 @@ import urllib.error
 from unittest import mock
 from assistant_core.main import sync_connection
 from assistant_core.storage import Store
+from assistant_core.workflow import Engine
 from assistant_core.telegram import Telegram, APIError, Forbidden, RateLimited, Conflict, DeliveryUnknown
 
 TOKEN='123:SECRET'
@@ -120,5 +121,29 @@ class SyncConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_connection_yet_skips_api(self):
         self.db.set('connection','{}');tg=FakeTelegram()
         self.assertIsNotNone(await sync_connection(tg,self.db,self.cfg));self.assertEqual(tg.calls,[])
+
+class AdmissionTests(unittest.IsolatedAsyncioTestCase):
+    """Only private chats of real candidates reach the workflow."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.db=Store(Path(self.tmp.name),'a')
+        self.cfg=SimpleNamespace(owner_id=10,business_owner_id=1,contacts=())
+        self.db.set('connection',json.dumps(conn()));self.e=Engine(self.cfg,self.db,FakeTelegram())
+    def tearDown(self):self.db.close();self.tmp.cleanup()
+    async def admit(self,chat=2,sender=None,chat_type='private',is_bot=False,uid=1):
+        m={'message_id':uid,'date':0,'chat':{'id':chat,'type':chat_type},'business_connection_id':'c',
+           'from':{'id':sender or chat,'is_bot':is_bot},'text':'Интересует вакансия'}
+        u={'update_id':uid,'business_message':m};self.db.ingest(u)
+        return await self.e.admit(u)
+
+    async def test_candidate_admitted(self):
+        self.assertTrue(await self.admit());self.assertIsNotNone(self.db.conversation(2))
+    async def test_owner_service_account_not_candidate(self):
+        self.assertFalse(await self.admit(chat=10));self.assertIsNone(self.db.conversation(10))
+    async def test_business_owner_saved_messages_not_candidate(self):
+        self.assertFalse(await self.admit(chat=1));self.assertIsNone(self.db.conversation(1))
+    async def test_bot_not_candidate(self):
+        self.assertFalse(await self.admit(chat=5,is_bot=True));self.assertIsNone(self.db.conversation(5))
+    async def test_group_ignored(self):
+        self.assertFalse(await self.admit(chat=-100,chat_type='group'))
 
 if __name__=='__main__':unittest.main()

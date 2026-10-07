@@ -148,6 +148,12 @@ class Engine:
             self.db.complete(uid)
             return False
 
+        # Служебные чаты владельца и другие боты не являются кандидатами
+        if chat in (self.cfg.owner_id, self.cfg.business_owner_id) or m.get('from', {}).get('is_bot'):
+            self.db.log('NOT_CANDIDATE', chat)
+            self.db.complete(uid)
+            return False
+
         sender = m.get('from', {}).get('id')
         if sender == self.cfg.business_owner_id and not m.get('sender_business_bot'):
             async with self.gate:
