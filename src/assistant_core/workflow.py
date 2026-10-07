@@ -1,18 +1,36 @@
 """Deterministic recruitment workflow. Fully rule-based, no external AI dependencies."""
 import asyncio
 import json
-import logging
+import re
 import time
 from .telegram import APIError, DeliveryUnknown
 from .recruitment_parser import is_vacancy_inquiry, is_explicit_consent, is_explicit_decline
-
-logger = logging.getLogger(__name__)
 
 HELP = (
     'Команды: /status, /stop, /resume, /manual CHAT, /auto CHAT, '
     '/resume_candidate CHAT, /reply CHAT TEXT, /pending. '
     'После запуска всегда STOP. Для запуска автоответов: /resume.'
 )
+
+MAX_ATTEMPTS = 3
+MAX_TEXT = 3900
+CANDIDATE_STOP_WORDS = frozenset({'stop', 'стоп', 'не отвечай'})
+PLEASANTRIES = frozenset({'спасибо', 'благодарю', 'понятно', 'понял', 'поняла', 'хорошо',
+                          'ок', 'ok', 'отлично', 'ясно'})
+INCOMPLETE = ('CONSENT_RECORDED', 'PRESENTATION_SENT')
+DECLINE_TEXT = 'Спасибо за отклик! Желаем успехов.'
+PDF_CAPTION = 'Условия согласованы. Направляю презентацию компании:'
+DEFAULT_INVITE = ('Спасибо! Ваше согласие зафиксировано. Ознакомьтесь с презентацией компании '
+                  'и присоединитесь к группе:')
+
+
+def _plain(text):
+    return ' '.join(re.sub(r'[^\w\s]', ' ', text.lower().replace('ё', 'е')).split())
+
+
+def _is_pleasantry(text):
+    words = _plain(text).split()
+    return 0 < len(words) <= 3 and all(w in PLEASANTRIES for w in words)
 
 
 class Engine:
@@ -21,6 +39,8 @@ class Engine:
         # Один send/STOP замок на весь процесс
         self.gate = asyncio.Lock()
         self.chats = {}
+
+    # ------------------------------------------------------------------ допуск и отправка
 
     def connection(self):
         return json.loads(self.db.get('connection', '{}'))
@@ -33,20 +53,28 @@ class Engine:
             and c.get('user', {}).get('id') == self.cfg.business_owner_id
         )
 
-    def can_send(self, chat, epoch, owner_action=False):
+    def _block_reason(self, chat, epoch, owner_action=False):
+        """Почему отправка запрещена (None, если разрешена). Те же условия, что раньше в can_send."""
         c = self.db.conversation(chat)
-        if not c or c['epoch'] != epoch:
-            return False
-        # Разрешаем отправку в диалоги кандидатов (исключая служебные ID владельцев)
-        is_permitted = (chat in self.cfg.contacts) or (chat != self.cfg.owner_id and chat != self.cfg.business_owner_id)
-        return bool(
-            is_permitted
-            and self.db.get('paused') == '0'
-            and (owner_action or c['mode'] == 'AUTO')
-            and self.connected(c['connection'])
-            and self.connection().get('rights', {}).get('can_reply')
-            and 0 <= time.time() - c['last_in'] < 24 * 3600
-        )
+        if not c:
+            return 'NO_CONVERSATION'
+        if c['epoch'] != epoch:
+            return 'EPOCH'
+        # config запрещает владельцам быть в contacts, поэтому проверка сводится к исключению служебных чатов
+        if chat in (self.cfg.owner_id, self.cfg.business_owner_id):
+            return 'SERVICE_CHAT'
+        if self.db.get('paused') != '0':
+            return 'STOP'
+        if not owner_action and c['mode'] != 'AUTO':
+            return 'MODE'
+        if not self.connected(c['connection']) or not self.connection().get('rights', {}).get('can_reply'):
+            return 'CONNECTION'
+        if not 0 <= time.time() - c['last_in'] < 24 * 3600:
+            return 'WINDOW'
+        return None
+
+    def can_send(self, chat, epoch, owner_action=False):
+        return self._block_reason(chat, epoch, owner_action) is None
 
     async def owner(self, text, key):
         await self.deliver(self.cfg.owner_id, text[:3900], key, owner_notice=True)
@@ -65,7 +93,7 @@ class Engine:
             payload = {'chat_id': chat}
             if not owner_notice:
                 payload['business_connection_id'] = self.db.conversation(chat)['connection']
-            payload['caption' if document else 'text'] = text[:1000 if document else 3900]
+            payload['caption' if document else 'text'] = text[:1000 if document else MAX_TEXT]
             try:
                 result = await self.tg.call(method, payload, document=document)
             except DeliveryUnknown:
@@ -84,7 +112,152 @@ class Engine:
                 )
             return result
 
+    # ------------------------------------------------------------------ шаги сценария
+
+    def _attempts(self, prefix):
+        """Попытки отправки шага: [(status, telegram_id), ...]. Ключи prefix:1, prefix:2, ..."""
+        found, n = [], 1
+        while True:
+            row = self.db.db.execute('SELECT status,telegram_id FROM outgoing WHERE dedupe=?',
+                                     (f'{prefix}:{n}',)).fetchone()
+            if not row:
+                return found
+            found.append((row[0], row[1]))
+            n += 1
+
+    async def _step(self, chat, prefix, text, epoch, document=None):
+        """Идемпотентная отправка одного шага сценария.
+        Ключ зависит от (чат, версия условий, шаг), а не от update_id: повторное событие
+        не дублирует рассылку. Возвращает (статус, telegram_id):
+        SENT | BLOCKED (не отправляли) | FAILED (точно не доставлено) | UNKNOWN (на сверку)."""
+        attempts = self._attempts(prefix)
+        for status, tid in attempts:
+            if status == 'SENT':
+                return 'SENT', tid
+        if any(s in ('UNKNOWN', 'SENDING') for s, _ in attempts):
+            return 'UNKNOWN', None          # вслепую не повторяем
+        if len(attempts) >= MAX_ATTEMPTS:
+            return 'FAILED', None
+        key = f'{prefix}:{len(attempts) + 1}'
+        res = await self.deliver(chat, text, key, epoch, document=document)
+        if res:
+            return 'SENT', res.get('message_id')
+        row = self.db.db.execute('SELECT status FROM outgoing WHERE dedupe=?', (key,)).fetchone()
+        return (row[0] if row else 'BLOCKED'), None
+
+    def _set_stage_safe(self, chat, stage, **kw):
+        """Отправка уже состоялась: факт надо сохранить. Параллельная смена этапа
+        (правка сообщения, эскалация) не должна ронять обработку."""
+        try:
+            return self.db.set_stage(chat, stage, **kw)
+        except ValueError:
+            self.db.log('STAGE_CONFLICT', chat, stage)
+            return False
+
+    async def _step_problem(self, chat, key, what, status, epoch):
+        if status == 'BLOCKED':
+            reason = self._block_reason(chat, epoch)
+            self.db.log('STEP_BLOCKED', chat, f'{what} {reason}')
+            if reason in ('STOP', 'CONNECTION', 'WINDOW'):
+                await self.owner(
+                    f'Диалог {chat}: шаг «{what}» не выполнен ({reason}). Этап сохранён, '
+                    f'продолжение — при следующем сообщении кандидата после снятия причины.',
+                    f'{key}:problem')
+
+            return
+
+        async with self.gate:
+            self._set_stage_safe(chat, 'AWAITING_OWNER', reason=f'{what} {status}')
+            self.db.mode(chat, 'AWAITING_OWNER')
+        hint = ('Возможно, сообщение доставлено: проверьте переписку, при необходимости /manual.'
+                if status == 'UNKNOWN' else 'Доставка не удалась (см. /pending).')
+        await self.owner(
+            f'Диалог {chat}: шаг «{what}» — {status}. {hint} Автоответчик в этом диалоге приостановлен. '
+            f'После решения: /resume_candidate {chat}',
+            f'{key}:problem')
+
+    async def _escalate(self, chat, text, reason, key, epoch):
+        """Один ответ кандидату, затем пауза диалога и вопрос владельцу.
+        Подтверждение отправляется ДО смены режима: mode() увеличивает epoch и меняет режим,
+        после этого can_send() заблокировал бы собственное подтверждение."""
+        ack = await self.deliver(chat, self.cfg.unknown_question_text, f'{key}:ack', epoch)
+        async with self.gate:
+            self._set_stage_safe(chat, 'AWAITING_OWNER', reason=reason)
+            self.db.mode(chat, 'AWAITING_OWNER')
+        await self.owner(
+            f'Кандидат {chat}: {reason}.\n"{text[:500]}"\n'
+            + ('' if ack else '⚠️ Подтверждение кандидату НЕ отправлено.\n')
+            + f'Ответить: /reply {chat} ТЕКСТ\n'
+            f'Возобновить автоответчик: /resume_candidate {chat}',
+            f'{key}:esc')
+
+    def _invite_text(self):
+        base = (self.cfg.invite_message_text or DEFAULT_INVITE).strip()
+        url = self.cfg.group_invite_url
+        return base if url in base else f'{base} {url}'
+
+    async def _send_conditions(self, chat, key, epoch):
+        version = self.cfg.conditions_version
+        cond_text = self.cfg.conditions_file.read_text(encoding='utf-8')
+        if len(cond_text) > MAX_TEXT:
+            # deliver() молча обрезал бы условия; ТЗ требует полный текст без изменений
+            raise ValueError('Conditions text is longer than one Telegram message')
+        status, mid = await self._step(chat, f'cond:{chat}:{version}', cond_text, epoch)
+        if status == 'SENT':
+            self._set_stage_safe(chat, 'CONDITIONS_SENT', conditions_version=version, conditions_mid=mid)
+        else:
+            await self._step_problem(chat, key, 'условия', status, epoch)
+
+    async def _finish_package(self, chat, key, epoch):
+        """Досылает недостающие шаги: PDF, затем ссылка. Состояние-ориентированно и идемпотентно:
+        вызывается и после согласия, и при следующем сообщении, и по команде владельца.
+        Возвращает True, если пакет выдан полностью."""
+        version = self.cfg.conditions_version
+        cand = self.db.candidate(chat)
+        stage = cand['stage'] if cand else None
+        if stage == 'CONSENT_RECORDED':
+            status, _ = await self._step(chat, f'pdf:{chat}:{version}', PDF_CAPTION, epoch,
+                                         document=self.cfg.presentation_file)
+            if status != 'SENT':
+                await self._step_problem(chat, key, 'презентация', status, epoch)
+                return False
+            self._set_stage_safe(chat, 'PRESENTATION_SENT')
+            stage = self.db.candidate(chat)['stage']
+        if stage == 'PRESENTATION_SENT':
+            status, _ = await self._step(chat, f'inv:{chat}:{version}', self._invite_text(), epoch)
+            if status != 'SENT':
+                await self._step_problem(chat, key, 'приглашение', status, epoch)
+                return False
+            self._set_stage_safe(chat, 'INVITE_SENT')
+            stage = self.db.candidate(chat)['stage']
+        return stage == 'INVITE_SENT'
+
+    async def _complete_if_needed(self, chat, key):
+        cand = self.db.candidate(chat)
+        conv = self.db.conversation(chat)
+        if cand and conv and cand['stage'] in INCOMPLETE:
+            done = await self._finish_package(chat, key, conv['epoch'])
+            if done:
+                await self.owner(f'Диалог {chat}: пакет (презентация и ссылка) выдан полностью.', f'{key}:done')
+
+    # ------------------------------------------------------------------ приём событий
+
     async def admit(self, update):
+        """Обёртка: необработанное исключение не должно ронять главный цикл.
+        Иначе «ядовитое» событие остаётся RECEIVED и валит процесс при каждом рестарте."""
+        try:
+            return await self._admit(update)
+        except Exception as exc:
+            uid = update.get('update_id')
+            self.db.log('ADMIT_ERROR', detail=type(exc).__name__)
+            self.db.complete(uid, 'REVIEW')
+            try:
+                await self.owner(f'Событие {uid} не удалось принять. /pending', f'admit_error:{uid}')
+            except Exception:
+                pass
+            return False
+
+    async def _admit(self, update):
         """Фиксация и валидация событий до передачи в обработчики."""
         uid = update['update_id']
         if 'business_connection' in update:
@@ -129,7 +302,7 @@ class Engine:
                             self.db.execute('UPDATE messages SET deleted=1 WHERE chat=? AND mid=?', (chat, mid))
                     self.db.mode(chat, 'AWAITING_OWNER')
                     if self.db.candidate(chat):
-                        self.db.set_stage(chat, 'AWAITING_OWNER', reason='message edited/deleted')
+                        self._set_stage_safe(chat, 'AWAITING_OWNER', reason='message edited/deleted')
                 notice = (
                     f'Изменение/удаление сообщения согласия в {chat}!'
                     if is_consent
@@ -145,12 +318,11 @@ class Engine:
             return False
 
         chat = m['chat']['id']
-        # Допуск: только личные чаты кандидатов через авторизованную Business связь
+
         if m['chat'].get('type') != 'private' or not self.connected(m.get('business_connection_id')):
             self.db.complete(uid)
             return False
 
-        # Служебные чаты владельца и другие боты не являются кандидатами
         if chat in (self.cfg.owner_id, self.cfg.business_owner_id) or m.get('from', {}).get('is_bot'):
             self.db.log('NOT_CANDIDATE', chat)
             self.db.complete(uid)
@@ -192,6 +364,8 @@ class Engine:
             self.db.log('PROCESS_ERROR', detail=type(exc).__name__)
             self.db.complete(uid, 'REVIEW')
             await self.owner(f'Событие {uid} требует проверки. /pending', f'error:{uid}')
+
+    # ------------------------------------------------------------------ команды владельца
 
     async def command(self, text, uid):
         bits = text.split(maxsplit=2)
@@ -247,14 +421,18 @@ class Engine:
             async with self.gate:
                 self.db.mode(chat, 'MANUAL' if command == '/manual' else 'AUTO')
             await self.owner(f'Режим {chat} обновлён.', key)
+            if command == '/auto':
+                await self._complete_if_needed(chat, key)
             return
 
         if command == '/resume_candidate':
-            resumed_stage = self.db.resume_candidate(chat)
-            if resumed_stage:
-                async with self.gate:
+            async with self.gate:
+                resumed_stage = self.db.resume_candidate(chat)
+                if resumed_stage:
                     self.db.mode(chat, 'AUTO')
+            if resumed_stage:
                 await self.owner(f'Диалог с {chat} возобновлен с этапа {resumed_stage}.', key)
+                await self._complete_if_needed(chat, key)
             else:
                 await self.owner(f'Не удалось возобновить диалог {chat}.', key)
             return
@@ -265,6 +443,8 @@ class Engine:
             return
 
         await self.owner(HELP, key)
+
+    # ------------------------------------------------------------------ сообщения кандидатов
 
     async def business(self, m, uid):
         chat = m['chat']['id']
@@ -277,7 +457,7 @@ class Engine:
         stage = cand['stage'] if cand else 'NEW'
 
         # Остановка диалога по запросу кандидата
-        if text.lower() in ('/stop', 'стоп', 'не отвечай'):
+        if _plain(text) in CANDIDATE_STOP_WORDS:
             async with self.gate:
                 self.db.mode(chat, 'MANUAL')
             await self.owner(f'Кандидат {chat} запросил остановку автообщения.', key + ':stop')
@@ -292,97 +472,59 @@ class Engine:
             self.db.log('SUPERSEDED_MESSAGE', chat, key)
             return
 
-        if not self.can_send(chat, epoch):
-            self.db.log('AUTO_SKIPPED', chat, key)
+        reason = self._block_reason(chat, epoch)
+        if reason:
+            self.db.log('AUTO_SKIPPED', chat, f'{key} {reason}')
+            # Сообщение, пришедшее при STOP/без прав/вне окна, иначе потеряется молча
+            if reason in ('STOP', 'CONNECTION', 'WINDOW') and stage not in ('DECLINED', 'AWAITING_OWNER'):
+                await self.owner(
+                    f'Сообщение от {chat} не обработано автоматически ({reason}):\n"{text[:300]}"\n'
+                    f'Ответьте вручную или после снятия причины попросите кандидата написать снова.',
+                    key + ':skipped')
             return
 
         if stage == 'NEW':
             if is_vacancy_inquiry(text):
-                cond_text = self.cfg.conditions_file.read_text(encoding='utf-8')
-                res = await self.deliver(chat, cond_text, key + ':cond', epoch)
-                if res:
-                    async with self.gate:
-                        if self.db.conversation(chat)['epoch'] != epoch:
-                            return
-                        self.db.set_stage(
-                            chat,
-                            'CONDITIONS_SENT',
-                            conditions_version=self.cfg.conditions_version,
-                            conditions_mid=res.get('message_id')
-                        )
+                await self._send_conditions(chat, key, epoch)
             return
 
         if stage == 'CONDITIONS_SENT':
-            # Явное согласие
-            if is_explicit_consent(text):
-                rec_res = 'REJECTED'
+            consent, decline = is_explicit_consent(text), is_explicit_decline(text)
+
+            if consent and not decline:
                 async with self.gate:
                     if self.db.conversation(chat)['epoch'] != epoch:
                         return
                     rec_res = self.db.record_consent(chat, m['message_id'], text, self.cfg.conditions_version)
-
+                if rec_res == 'DUPLICATE':
+                    return
                 if rec_res != 'RECORDED':
+                    # другая версия условий / сообщение раньше условий: решает владелец
+                    await self._escalate(chat, text, 'согласие не принято (' + rec_res + ')', key, epoch)
                     return
-
-                # Отправка презентации компании в виде файла PDF
-                pres_path = self.cfg.presentation_file
-                res_doc = await self.deliver(
-                    chat,
-                    'Условия согласованы. Направляю презентацию компании:',
-                    key + ':pdf',
-                    epoch,
-                    document=pres_path
-                )
-                if not res_doc:
-                    return
-
-                async with self.gate:
-                    self.db.set_stage(chat, 'PRESENTATION_SENT')
-
-                # Отправка приглашения ссылкой
-                invite_msg = (
-                    f"Спасибо! Ваше согласие зафиксировано. Ознакомьтесь с презентацией компании "
-                    f"и присоединитесь к группе: {self.cfg.group_invite_url}"
-                )
-                res_inv = await self.deliver(chat, invite_msg, key + ':inv', epoch)
-                if res_inv:
-                    async with self.gate:
-                        self.db.set_stage(chat, 'INVITE_SENT')
+                await self._finish_package(chat, key, epoch)
                 return
 
-            # Явный отказ
-            if is_explicit_decline(text):
-                res_dec = await self.deliver(chat, 'Спасибо за отклик! Желаем успехов.', key + ':dec', epoch)
-                if res_dec:
-                    async with self.gate:
-                        if self.db.conversation(chat)['epoch'] != epoch:
-                            return
-                        self.db.set_stage(chat, 'DECLINED')
+            if decline and not consent:
+                status, _ = await self._step(chat, f'dec:{chat}:{self.cfg.conditions_version}', DECLINE_TEXT, epoch)
+                if status == 'SENT':
+                    self._set_stage_safe(chat, 'DECLINED')
+                else:
+                    await self._step_problem(chat, key, 'отказ', status, epoch)
                 return
 
-            # Неизвестный вопрос / сомнения -> перевод на владельца
-            async with self.gate:
-                if self.db.conversation(chat)['epoch'] != epoch:
-                    return
-                self.db.set_stage(chat, 'AWAITING_OWNER', reason='unknown inquiry during conditions')
-                self.db.mode(chat, 'AWAITING_OWNER')
-
-            await self.deliver(chat, self.cfg.unknown_question_text, key + ':ack', epoch)
-            await self.owner(
-                f'Кандидат {chat} задал вопрос на этапе условий:\n"{text}"\n'
-                f'Ответить: /reply {chat} ТЕКСТ\n'
-                f'Возобновить автоответчик: /resume_candidate {chat}',
-                key + ':esc'
-            )
+            # Неизвестный вопрос, сомнение или одновременно согласие и отказ -> владелец
+            why = 'неоднозначный ответ' if (consent and decline) else 'вопрос на этапе условий'
+            await self._escalate(chat, text, why, key, epoch)
             return
 
-        if stage in ('CONSENT_RECORDED', 'PRESENTATION_SENT', 'INVITE_SENT'):
-            if is_explicit_consent(text) or is_vacancy_inquiry(text):
-                return
-            async with self.gate:
-                if self.db.conversation(chat)['epoch'] != epoch:
+        if stage in INCOMPLETE or stage == 'INVITE_SENT':
+            if stage in INCOMPLETE:
+                # Пакет не доведён до конца (STOP, смена epoch, сбой): сначала досылаем его
+                await self._finish_package(chat, key, epoch)
+                cand = self.db.candidate(chat)
+                if not cand or cand['stage'] != 'INVITE_SENT':
                     return
-                self.db.set_stage(chat, 'AWAITING_OWNER', reason='post-consent inquiry')
-                self.db.mode(chat, 'AWAITING_OWNER')
-            await self.deliver(chat, self.cfg.unknown_question_text, key + ':ack_post', epoch)
-            await self.owner(f'Кандидат {chat} (этап {stage}) прислал сообщение:\n"{text}"', key + ':esc_post')
+            if '?' not in text and (is_explicit_consent(text) or is_vacancy_inquiry(text) or _is_pleasantry(text)):
+                return
+            await self._escalate(chat, text, f'сообщение после согласия (этап {stage})', key, epoch)
