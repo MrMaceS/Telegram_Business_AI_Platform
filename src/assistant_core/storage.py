@@ -206,7 +206,10 @@ class Store:
                 done = self.db.execute('SELECT 1 FROM consents WHERE chat=? AND conditions_version=?',
                                        (chat, conditions_version)).fetchone()
                 return 'DUPLICATE' if done else 'REJECTED'
-            if row['conditions_mid'] is not None and mid <= row['conditions_mid']:
+            # Условия должны быть фактически отправлены (conditions_mid установлен)
+            if row['conditions_mid'] is None:
+                return 'REJECTED'
+            if mid <= row['conditions_mid']:
                 return 'REJECTED'
             at = datetime.now(timezone.utc).isoformat(timespec='seconds')
             self.db.execute('INSERT INTO consents(chat,mid,text,conditions_version,at_utc) VALUES(?,?,?,?,?)',
