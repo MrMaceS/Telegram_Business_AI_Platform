@@ -99,7 +99,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         u=await self.admitted(self.update(document={'file_id':'f','file_name':'../../evil.zip','file_size':10}))
         self.db.mode(2,'MANUAL');await self.e.process(u)
         row=self.db.db.execute('SELECT * FROM artifacts').fetchone()
-        self.assertTrue(Path(row['path']).is_relative_to(self.cfg.data_dir))
+        self.assertTrue(Path(row['path']).is_relative_to(self.cfg.data_dir.resolve()))
         self.assertEqual(row['sha256'],hashlib.sha256(Path(row['path']).read_bytes()).hexdigest())
         self.assertFalse(self.business_sends())
     async def test_new_message_invalidates_old_epoch(self):
