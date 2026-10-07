@@ -1,8 +1,13 @@
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 import urllib.error
 from unittest import mock
+from assistant_core.main import sync_connection
+from assistant_core.storage import Store
 from assistant_core.telegram import Telegram, APIError, Forbidden, RateLimited, Conflict, DeliveryUnknown
 
 TOKEN='123:SECRET'
@@ -50,5 +55,44 @@ class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(APIError) as ctx:
             await self.fails('sendMessage',http_error(400,{'ok':False,'error_code':400,'description':'Bad Request'}))
         e=ctx.exception;self.assertNotIn('SECRET',str(e)+e.description+repr(e.args))
+
+class FakeTelegram:
+    def __init__(self,result=None,error=None):self.result,self.error,self.calls=result,error,[]
+    async def call(self,method,payload=None,document=None):
+        self.calls.append((method,payload))
+        if self.error:raise self.error
+        return self.result
+
+def conn(enabled=True,can_reply=True,owner=1):
+    return {'id':'c','user':{'id':owner},'is_enabled':enabled,'rights':{'can_reply':can_reply}}
+
+class SyncConnectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.db=Store(Path(self.tmp.name),'a')
+        self.cfg=SimpleNamespace(business_owner_id=1);self.db.set('connection',json.dumps(conn()))
+    def tearDown(self):self.db.close();self.tmp.cleanup()
+    def stored(self):return json.loads(self.db.get('connection'))
+
+    async def test_unchanged_connection_is_ok(self):
+        tg=FakeTelegram(conn());self.assertIsNone(await sync_connection(tg,self.db,self.cfg))
+        self.assertEqual(tg.calls,[('getBusinessConnection',{'business_connection_id':'c'})])
+    async def test_revoked_while_offline_is_stored(self):
+        self.assertIsNotNone(await sync_connection(FakeTelegram(conn(enabled=False)),self.db,self.cfg))
+        self.assertFalse(self.stored()['is_enabled'])
+    async def test_can_reply_removed_warns(self):
+        self.assertIn('can_reply',await sync_connection(FakeTelegram(conn(can_reply=False)),self.db,self.cfg))
+        self.assertFalse(self.stored()['rights']['can_reply'])
+    async def test_definitive_refusal_fails_closed(self):
+        await sync_connection(FakeTelegram(error=APIError('x',400,'Bad Request')),self.db,self.cfg)
+        self.assertFalse(self.stored()['is_enabled'])
+    async def test_network_failure_keeps_state(self):
+        self.assertIsNotNone(await sync_connection(FakeTelegram(error=APIError()),self.db,self.cfg))
+        self.assertTrue(self.stored()['is_enabled'])
+    async def test_foreign_owner_fails_closed(self):
+        await sync_connection(FakeTelegram(conn(owner=99)),self.db,self.cfg)
+        self.assertFalse(self.stored()['is_enabled']);self.assertEqual(self.stored()['user']['id'],1)
+    async def test_no_connection_yet_skips_api(self):
+        self.db.set('connection','{}');tg=FakeTelegram()
+        self.assertIsNotNone(await sync_connection(tg,self.db,self.cfg));self.assertEqual(tg.calls,[])
 
 if __name__=='__main__':unittest.main()

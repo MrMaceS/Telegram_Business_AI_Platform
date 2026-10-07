@@ -12,6 +12,31 @@ from .ai import AI
 from .workflow import Engine
 from .locking import ProcessLock
 
+async def sync_connection(tg,db,cfg):
+    """A revocation made while offline may never arrive as an update; re-read rights at start.
+    Returns a warning for the owner, or None when replies are allowed."""
+    stored=json.loads(db.get('connection','{}'))
+    if not stored.get('id'):
+        return 'Business-подключение ещё не получено: подключите бота в Telegram Business.'
+    try:
+        fresh=await tg.call('getBusinessConnection',{'business_connection_id':stored['id']})
+    except APIError as exc:
+        if exc.code is None:
+            db.log('CONNECTION_CHECK_FAILED');return 'Не удалось проверить Business-подключение (сеть).'
+        # Telegram definitively refused: fail closed until a fresh business_connection update arrives.
+        fresh=dict(stored,is_enabled=False)
+    if fresh.get('user',{}).get('id')!=cfg.business_owner_id:
+        fresh=dict(stored,is_enabled=False)
+    if fresh!=stored:
+        db.set('connection',json.dumps(fresh))
+        db.execute('UPDATE conversations SET epoch=epoch+1')
+        db.log('CONNECTION_REFRESHED',detail=f"enabled={fresh.get('is_enabled')}")
+    if fresh.get('is_enabled') is not True:
+        return 'Business-подключение отключено: автоответы невозможны.'
+    if not fresh.get('rights',{}).get('can_reply'):
+        return 'У бота нет права отвечать (can_reply): автоответы невозможны.'
+    return None
+
 async def run(cfg):
     cfg.data_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
     lock=ProcessLock(cfg.data_dir/'runtime.lock')
@@ -26,7 +51,8 @@ async def run(cfg):
         raise ValueError('Webhook already configured; installer must reconcile explicitly')
     db.recover()
     engine=Engine(cfg,db,tg,AI(cfg.model,os.environ.get('AI_MODE','ollama'),os.environ.get('OLLAMA_URL','http://127.0.0.1:11434')))
-    await engine.owner('Ядро запущено в STOP. Проверьте /pending и /status; /resume включает разрешённые автоответы.',f'start:{time.time_ns()}')
+    warning=await sync_connection(tg,db,cfg)
+    await engine.owner('Ядро запущено в STOP. Проверьте /pending и /status; /resume включает разрешённые автоответы.'+('\n'+warning if warning else ''),f'start:{time.time_ns()}')
     running={}
     async def execute(update):
         await engine.process(update)
