@@ -69,13 +69,18 @@ def build(root: Path, tg: FakeTelegram):
     cfg_json = json.loads(
         (ROOT / 'examples/config.example.json').read_text(
             encoding='utf-8'))
+    scenario = json.loads((ROOT / 'examples/recruitment.scenario.json').read_text(encoding='utf-8'))
+    scenario['conditions_file'] = str(mats / 'vacancy_conditions.txt')
+    scenario['presentation_file'] = str(mats / 'company_presentation.pdf')
+    scenario_path = root / 'scenario.json'
+    scenario_path.write_text(json.dumps(scenario, ensure_ascii=False), encoding='utf-8')
     cfg_json.update(
         owner_id=OWNER,
         business_owner_id=OWNER,
         contacts=[CANDIDATE],
         data_dir=str(root / 'data'),
         materials_dir=str(mats),
-        scenario_file=str(ROOT / 'examples/recruitment.scenario.json'),
+        recruitment_scenario='scenario.json',
     )
     path = root / 'config.json'
     path.write_text(
@@ -129,8 +134,11 @@ class Acceptance(unittest.IsolatedAsyncioTestCase):
     async def candidate(self, text, chat=CANDIDATE, uid=None,
                         sender=None, mid=None):
         uid = uid or self.uid()
+        # Telegram message IDs in a chat increase independently from update_id.
+        # Keep candidate IDs above IDs returned by FakeTelegram so consent is
+        # correctly recognized as a message sent after the conditions.
         message = {
-            'message_id': mid or uid,
+            'message_id': mid or (2000 + uid),
             'date': int(time.time()),
             'chat': {'id': chat, 'type': 'private'},
             'from': {'id': sender or chat},

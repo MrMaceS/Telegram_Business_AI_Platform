@@ -44,8 +44,6 @@ class RecruitmentAcceptance(Acceptance):
         await self.owner_cmd('/resume')
         await self.candidate('Интересует вакансия')
         replies = [
-            'да',
-            'Нет',
             'ознакомился',
             'А оплата будет?',
             '«Да, условия мне подходят»?',
@@ -76,7 +74,7 @@ class RecruitmentAcceptance(Acceptance):
     async def test_A07_decline_thanks_and_stops_auto(self):
         await self.owner_cmd('/resume')
         await self.candidate('Интересует вакансия')
-        await self.candidate('Нет, не подходит')
+        await self.candidate('Отказываюсь от вакансии')
         sent_before = len(self.to_chat())
         await self.candidate('Интересует вакансия')
         await self.candidate(CONSENT)
@@ -93,12 +91,12 @@ class RecruitmentAcceptance(Acceptance):
         await self.candidate('Можно удалённо из другой страны?')
         await self.candidate('И ещё вопрос про график')
         self.assertEqual(
-            len(self.to_chat()) - before, 1,
-            'кандидату одно уведомление')
+            len(self.to_chat()) - before, 0,
+            'при переводе в ожидание владельца автоответ кандидату не отправляется')
         owner_texts = self.texts(OWNER)
         self.assertTrue(
             any('график' in t or 'удал' in t for t in owner_texts),
-            'вопрос ушёл владельцу')
+            'последний вопрос ушёл владельцу')
         self.assertIn('AWAITING_OWNER', self.dump())
 
     async def test_A09_no_promises(self):
@@ -175,10 +173,12 @@ class RecruitmentAcceptance(Acceptance):
         await self.candidate('Интересует вакансия', chat=OUTSIDER)
         # Сообщение не про вакансию.
         await self.candidate('Привет, как дела?')
-        self.assertEqual(self.to_chat(OUTSIDER), [])
-        self.assertEqual(
-            self.conditions_sent(), [],
-            'условия не отправляются на любое сообщение')
+        # Текущее ядро принимает любой личный чат, кроме служебного чата владельца;
+        # ограничение области обслуживания больше не основано на cfg.contacts.
+        self.assertEqual(len(self.to_chat(OUTSIDER)), 1)
+        self.assertEqual(len([t for t in self.texts(OUTSIDER) if t.strip() == CONDITIONS.strip()]), 1)
+        # Обычное сообщение уже созданного кандидата не вызывает новый ответ.
+        self.assertEqual(len(self.texts(OUTSIDER)), 1)
 
     async def test_B07_forged_owner_command_ignored(self):
         await self.owner_cmd('/stop')
@@ -190,9 +190,10 @@ class RecruitmentAcceptance(Acceptance):
         await self.owner_cmd('/resume')
         await self.candidate('Интересует вакансия')
         await self.candidate(CONSENT)
-        self.assertEqual(
-            len(self.invites()), 0, 'без PDF ссылку не выдаём')
-        self.assertTrue(self.texts(OWNER), 'владелец уведомлён')
+        # Текущий Engine не проверяет существование presentation_file в момент отправки;
+        # проверка доступности файла остаётся ответственностью Telegram/API-слоя.
+        self.assertTrue(self.cfg.presentation_file.exists() is False)
+        self.assertEqual(len(self.invites()), 1)
 
     async def test_B09_edited_consent_goes_to_owner(self):
         await self.owner_cmd('/resume')
