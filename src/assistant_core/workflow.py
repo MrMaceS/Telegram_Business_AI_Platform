@@ -59,9 +59,9 @@ class Engine:
                     raise ValueError('Invalid owner target')
             elif not self.can_send(chat, epoch, owner_action):
                 self.db.log('SEND_BLOCKED', chat, key)
-                return False
+                return None
             if not self.db.reserve(key, chat, method):
-                return False
+                return None
             payload = {'chat_id': chat}
             if not owner_notice:
                 payload['business_connection_id'] = self.db.conversation(chat)['connection']
@@ -71,18 +71,18 @@ class Engine:
             except DeliveryUnknown:
                 self.db.outgoing_result(key, 'UNKNOWN')
                 self.db.log('DELIVERY_UNKNOWN', chat, key)
-                return False
+                return None
             except APIError:
                 self.db.outgoing_result(key, 'FAILED')
                 self.db.log('DELIVERY_FAILED', chat, key)
-                return False
+                return None
             self.db.outgoing_result(key, 'SENT', result)
             if not owner_notice:
                 self.db.execute(
                     'INSERT OR IGNORE INTO messages(chat,mid,direction,body) VALUES(?,?,?,?)',
                     (chat, result['message_id'], 'assistant', text[:8000])
                 )
-            return True
+            return result
 
     async def admit(self, update):
         """Фиксация и валидация событий до передачи в обработчики."""
@@ -128,6 +128,8 @@ class Engine:
                         for mid in m.get('message_ids', []):
                             self.db.execute('UPDATE messages SET deleted=1 WHERE chat=? AND mid=?', (chat, mid))
                     self.db.mode(chat, 'AWAITING_OWNER')
+                    if self.db.candidate(chat):
+                        self.db.set_stage(chat, 'AWAITING_OWNER', reason='message edited/deleted')
                 notice = (
                     f'Изменение/удаление сообщения согласия в {chat}!'
                     if is_consent
@@ -213,7 +215,9 @@ class Engine:
 
         if command == '/status':
             rows = self.db.db.execute(
-                'SELECT chat,mode,task_id,task_status FROM conversations ORDER BY chat LIMIT 30'
+                'SELECT c.chat, c.mode, cd.stage, cd.prev_stage '
+                'FROM conversations c LEFT JOIN candidates cd ON c.chat = cd.chat '
+                'ORDER BY c.chat LIMIT 30'
             ).fetchall()
             await self.owner('STOP=' + str(self.db.get('paused')) + '\n' + '\n'.join(str(dict(x)) for x in rows), key)
             return
@@ -248,14 +252,16 @@ class Engine:
         if command == '/resume_candidate':
             resumed_stage = self.db.resume_candidate(chat)
             if resumed_stage:
+                async with self.gate:
+                    self.db.mode(chat, 'AUTO')
                 await self.owner(f'Диалог с {chat} возобновлен с этапа {resumed_stage}.', key)
             else:
                 await self.owner(f'Не удалось возобновить диалог {chat}.', key)
             return
 
         if command == '/reply' and len(bits) == 3:
-            ok = await self.deliver(chat, bits[2], key + ':approved', row['epoch'], owner_action=True)
-            await self.owner('Утверждённый текст отправлен.' if ok else 'Не отправлено. Проверьте STOP/права.', key)
+            res = await self.deliver(chat, bits[2], key + ':approved', row['epoch'], owner_action=True)
+            await self.owner('Утверждённый текст отправлен.' if res else 'Не отправлено. Проверьте STOP/права.', key)
             return
 
         await self.owner(HELP, key)
@@ -266,7 +272,9 @@ class Engine:
         row = self.db.conversation(chat)
         text = (m.get('text') or m.get('caption') or '').strip()
         epoch = row['epoch']
-        stage = row['task_status'] or 'NEW'
+
+        cand = self.db.candidate(chat)
+        stage = cand['stage'] if cand else 'NEW'
 
         # Остановка диалога по запросу кандидата
         if text.lower() in ('/stop', 'стоп', 'не отвечай'):
@@ -291,32 +299,41 @@ class Engine:
         if stage == 'NEW':
             if is_vacancy_inquiry(text):
                 cond_text = self.cfg.conditions_file.read_text(encoding='utf-8')
-                async with self.gate:
-                    if self.db.conversation(chat)['epoch'] != epoch:
-                        return
-                    self.db.set_stage(chat, 'CONDITIONS_SENT')
-                await self.deliver(chat, cond_text, key + ':cond', epoch)
+                res = await self.deliver(chat, cond_text, key + ':cond', epoch)
+                if res:
+                    async with self.gate:
+                        if self.db.conversation(chat)['epoch'] != epoch:
+                            return
+                        self.db.set_stage(
+                            chat,
+                            'CONDITIONS_SENT',
+                            conditions_version=self.cfg.conditions_version,
+                            conditions_mid=res.get('message_id')
+                        )
             return
 
         if stage == 'CONDITIONS_SENT':
             # Явное согласие
             if is_explicit_consent(text):
+                rec_res = 'REJECTED'
                 async with self.gate:
                     if self.db.conversation(chat)['epoch'] != epoch:
                         return
-                    self.db.record_consent(chat, m['message_id'], text, self.cfg.conditions_version)
-                    self.db.set_stage(chat, 'CONSENT_RECORDED')
+                    rec_res = self.db.record_consent(chat, m['message_id'], text, self.cfg.conditions_version)
+
+                if rec_res != 'RECORDED':
+                    return
 
                 # Отправка презентации компании в виде файла PDF
                 pres_path = self.cfg.presentation_file
-                ok_doc = await self.deliver(
+                res_doc = await self.deliver(
                     chat,
                     'Условия согласованы. Направляю презентацию компании:',
                     key + ':pdf',
                     epoch,
                     document=pres_path
                 )
-                if not ok_doc:
+                if not res_doc:
                     return
 
                 async with self.gate:
@@ -327,26 +344,27 @@ class Engine:
                     f"Спасибо! Ваше согласие зафиксировано. Ознакомьтесь с презентацией компании "
                     f"и присоединитесь к группе: {self.cfg.group_invite_url}"
                 )
-                ok_inv = await self.deliver(chat, invite_msg, key + ':inv', epoch)
-                if ok_inv:
+                res_inv = await self.deliver(chat, invite_msg, key + ':inv', epoch)
+                if res_inv:
                     async with self.gate:
                         self.db.set_stage(chat, 'INVITE_SENT')
                 return
 
             # Явный отказ
             if is_explicit_decline(text):
-                async with self.gate:
-                    if self.db.conversation(chat)['epoch'] != epoch:
-                        return
-                    self.db.set_stage(chat, 'DECLINED')
-                await self.deliver(chat, 'Спасибо за отклик! Желаем успехов.', key + ':dec', epoch)
+                res_dec = await self.deliver(chat, 'Спасибо за отклик! Желаем успехов.', key + ':dec', epoch)
+                if res_dec:
+                    async with self.gate:
+                        if self.db.conversation(chat)['epoch'] != epoch:
+                            return
+                        self.db.set_stage(chat, 'DECLINED')
                 return
 
-            # В. Неизвестный вопрос / сомнения -> перевод на владельца
+            # Неизвестный вопрос / сомнения -> перевод на владельца
             async with self.gate:
                 if self.db.conversation(chat)['epoch'] != epoch:
                     return
-                self.db.set_stage(chat, 'AWAITING_OWNER', previous_stage=stage)
+                self.db.set_stage(chat, 'AWAITING_OWNER', reason='unknown inquiry during conditions')
                 self.db.mode(chat, 'AWAITING_OWNER')
 
             await self.deliver(chat, self.cfg.unknown_question_text, key + ':ack', epoch)
@@ -364,7 +382,7 @@ class Engine:
             async with self.gate:
                 if self.db.conversation(chat)['epoch'] != epoch:
                     return
-                self.db.set_stage(chat, 'AWAITING_OWNER', previous_stage=stage)
+                self.db.set_stage(chat, 'AWAITING_OWNER', reason='post-consent inquiry')
                 self.db.mode(chat, 'AWAITING_OWNER')
             await self.deliver(chat, self.cfg.unknown_question_text, key + ':ack_post', epoch)
             await self.owner(f'Кандидат {chat} (этап {stage}) прислал сообщение:\n"{text}"', key + ':esc_post')
