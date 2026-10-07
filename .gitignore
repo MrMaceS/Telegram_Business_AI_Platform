@@ -1,13 +1,44 @@
+# Секреты и локальная конфигурация
 .env
 secrets/
 private/
 config.json
-.venv/
-backup*/
-restored*/
-clients/
+*.dpapi
+bot-token*
+
+# Данные клиента
 data/
+clients/
+
+# Копии
+backup*/
 backups/
+restored*/
+
+# Python
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# База
 *.sqlite3*
+*.db
+
+# Логи
+*.log
+
+# Windows
+Thumbs.db
+Desktop.ini
+~$*.docx
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Временное
+*.tmp
+*.bak
