@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "implementation_status": "TO_IMPLEMENT_BY_TEAM; not consumed by starter 0.2.0",
+  "conditions_version": "2026-10-06-v1",
+  "conditions_file": "examples/materials/vacancy_conditions.txt",
+  "presentation_file": "examples/materials/company_presentation.pdf",
+  "group_invite_url": "https://t.me/+EvhipOH4o6IwMTFl",
+  "welcome_file": "examples/materials/group_welcome.txt",
+  "vacancy_trigger_examples": [
+    "Интересует вакансия",
+    "Здравствуйте, хочу узнать о вакансии",
+    "Пишу по поводу вакансии"
+  ],
+  "explicit_consent_examples": [
+    "Да, условия мне подходят. Я согласен(на) перейти к следующему этапу",
+    "Да, условия мне подходят. Я согласен перейти к следующему этапу",
+    "Да, условия мне подходят. Я согласна перейти к следующему этапу"
+  ],
+  "unknown_question": "Передам ваш вопрос Владимиру для ответа.",
+  "invite_message": "Спасибо! Ваше согласие зафиксировано. Ознакомьтесь с презентацией компании и присоединитесь к группе: https://t.me/+EvhipOH4o6IwMTFl",
+  "permitted_actions": [
+    "send_conditions_once",
+    "record_explicit_consent",
+    "send_presentation_once",
+    "send_invite_once",
+    "escalate_to_owner",
+    "stop_or_manual"
+  ],
+  "forbidden_actions": [
+    "force_add_group_member",
+    "assign_job_or_payment",
+    "change_conditions",
+    "promise_employment",
+    "reject_candidate_autonomously"
+  ],
+  "path_base": "project root; install copies may configure different absolute paths"
+}

@@ -1,0 +1,30 @@
+Environment: Linux build workspace; Telegram/AI are mocks. Windows and live integration NOT RUN.
+Command: PYTHONPATH=handoff/src python3 -m unittest discover -s handoff/tests -v
+test_burst_answers_latest_context_once (test_core.CoreTests.test_burst_answers_latest_context_once) ... ok
+test_critical_request_escalates_without_model_commitment (test_core.CoreTests.test_critical_request_escalates_without_model_commitment) ... ok
+test_daily_quota_persists (test_core.CoreTests.test_daily_quota_persists) ... ok
+test_download_cannot_reopen_accepted_task (test_core.CoreTests.test_download_cannot_reopen_accepted_task) ... ok
+test_edit_pauses_and_rebuilds_history (test_core.CoreTests.test_edit_pauses_and_rebuilds_history) ... ok
+test_ingest_deduplicates_and_persists_offset (test_core.CoreTests.test_ingest_deduplicates_and_persists_offset) ... ok
+test_instance_isolation_and_database_binding (test_core.CoreTests.test_instance_isolation_and_database_binding) ... ok
+test_manual_file_receipt_persists_without_auto_reply (test_core.CoreTests.test_manual_file_receipt_persists_without_auto_reply) ... ok
+test_new_message_invalidates_old_epoch (test_core.CoreTests.test_new_message_invalidates_old_epoch) ... ok
+test_only_approved_faq_is_sent (test_core.CoreTests.test_only_approved_faq_is_sent) ... ok
+test_partial_issue_blocks_reissue (test_core.CoreTests.test_partial_issue_blocks_reissue) ... ok
+test_path_escape_rejected (test_core.CoreTests.test_path_escape_rejected) ... ok
+test_restart_and_restore_are_paused (test_core.CoreTests.test_restart_and_restore_are_paused) ... ok
+test_restart_between_receipt_and_admission (test_core.CoreTests.test_restart_between_receipt_and_admission) ... ok
+test_second_process_lock_is_rejected (test_core.CoreTests.test_second_process_lock_is_rejected) ... ok
+test_stop_during_ai_and_resume_invalidates_generation (test_core.CoreTests.test_stop_during_ai_and_resume_invalidates_generation) ... ok
+test_stop_send_gate (test_core.CoreTests.test_stop_send_gate) ... ok
+test_unauthorized_owner_commands_rejected (test_core.CoreTests.test_unauthorized_owner_commands_rejected) ... ok
+test_uncertain_send_never_retries (test_core.CoreTests.test_uncertain_send_never_retries) ... ok
+test_unknown_contact_and_connection_denied (test_core.CoreTests.test_unknown_contact_and_connection_denied) ... ok
+test_window_and_rights_enforced (test_core.CoreTests.test_window_and_rights_enforced) ... ok
+test_cloud_endpoint_and_model_rejected (test_core.LocalAITests.test_cloud_endpoint_and_model_rejected) ... ok
+test_faq_mode_has_no_ai_network_call (test_core.LocalAITests.test_faq_mode_has_no_ai_network_call) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 0.058s
+
+OK

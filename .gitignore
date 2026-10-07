@@ -1,0 +1,13 @@
+.env
+secrets/
+private/
+config.json
+.venv/
+backup*/
+restored*/
+clients/
+data/
+backups/
+__pycache__/
+*.pyc
+*.sqlite3*

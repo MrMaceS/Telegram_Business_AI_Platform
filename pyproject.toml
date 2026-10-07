@@ -1,0 +1,6 @@
+[project]
+name = "telegram-business-core-starter"
+version = "0.2.0"
+description = "Auditable starter for a modular Telegram Business assistant"
+requires-python = ">=3.12"
+dependencies = []
