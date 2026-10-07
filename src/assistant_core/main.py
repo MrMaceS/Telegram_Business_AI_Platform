@@ -7,7 +7,7 @@ import os
 import time
 from .config import Config
 from .storage import Store
-from .telegram import Telegram, APIError
+from .telegram import Telegram, APIError, Conflict, RateLimited
 from .ai import AI
 from .workflow import Engine
 from .locking import ProcessLock
@@ -58,8 +58,15 @@ async def run(cfg):
                     if 'message' in update:continue
                     if len(running)>=10:break
                     running[row['id']]=asyncio.create_task(execute(update))
-            except APIError:
-                db.log('POLL_ERROR')
+            except RateLimited as exc:
+                db.log('POLL_RATE_LIMITED',detail=f'retry_after={exc.retry_after}')
+                await asyncio.sleep(min(int(exc.retry_after or 5),300))
+            except Conflict:
+                # Another poller/webhook owns the token; keep backing off, never fight it.
+                db.log('POLL_CONFLICT')
+                await asyncio.sleep(30)
+            except APIError as exc:
+                db.log('POLL_ERROR',detail=exc.code or '')
                 await asyncio.sleep(2)
             await asyncio.sleep(.05)
     finally:

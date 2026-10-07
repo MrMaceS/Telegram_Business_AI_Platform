@@ -7,10 +7,30 @@ import urllib.error
 import uuid
 
 class APIError(Exception):
-    pass
+    """Telegram definitely did not perform the operation."""
+    def __init__(self, message='Telegram request failed', code=None, description='', retry_after=None):
+        super().__init__(message)
+        self.code, self.description, self.retry_after = code, description, retry_after
+
+class Forbidden(APIError):
+    """403: bot blocked by user, Business rights revoked or chat not allowed."""
+
+class RateLimited(APIError):
+    """429: flood control; retry_after seconds before the next request."""
+
+class Conflict(APIError):
+    """409: another getUpdates poller or a webhook owns this token."""
 
 class DeliveryUnknown(Exception):
     pass
+
+def rejection(body):
+    """Typed error from Telegram's {"ok":false,"error_code":..} body; description never holds the token."""
+    code = body.get('error_code')
+    description = str(body.get('description', ''))[:300]
+    retry_after = (body.get('parameters') or {}).get('retry_after')
+    cls = {403: Forbidden, 429: RateLimited, 409: Conflict}.get(code, APIError)
+    return cls(f'Telegram HTTP {code}', code, description, retry_after)
 
 class Telegram:
     def __init__(self, token):
@@ -41,12 +61,17 @@ class Telegram:
             with urllib.request.urlopen(request, timeout=35 if method=='getUpdates' else 20) as response:
                 body = json.loads(response.read(10_000_000))
             if not body.get('ok'):
-                raise APIError('Telegram rejected operation')
+                raise rejection(body)
             return body['result']
         except urllib.error.HTTPError as exc:
             if mutating and exc.code >= 500:
                 raise DeliveryUnknown('Telegram response uncertain') from None
-            raise APIError(f'Telegram HTTP {exc.code}') from None
+            try:
+                body = json.loads(exc.read(100_000))
+            except Exception:
+                body = {}
+            body.setdefault('error_code', exc.code)
+            raise rejection(body) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError):
             if mutating:
                 raise DeliveryUnknown('Telegram response uncertain') from None
