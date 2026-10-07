@@ -56,6 +56,32 @@ class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
             await self.fails('sendMessage',http_error(400,{'ok':False,'error_code':400,'description':'Bad Request'}))
         e=ctx.exception;self.assertNotIn('SECRET',str(e)+e.description+repr(e.args))
 
+class DocumentUploadTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.dir=Path(self.tmp.name);self.tg=Telegram(TOKEN)
+    def tearDown(self):self.tmp.cleanup()
+    async def send(self,path):
+        ok=Response(json.dumps({'ok':True,'result':{'message_id':5}}).encode())
+        with mock.patch('urllib.request.urlopen',return_value=ok) as urlopen:
+            try:return await self.tg.call('sendDocument',{'chat_id':2,'caption':'c'},document=path),urlopen
+            except APIError as exc:return exc,urlopen
+
+    async def test_pdf_sent_as_application_pdf(self):
+        pdf=self.dir/'company_presentation.pdf';pdf.write_bytes(b'%PDF-1.4 demo')
+        result,urlopen=await self.send(pdf)
+        self.assertEqual(result,{'message_id':5})
+        body=urlopen.call_args[0][0].data
+        self.assertIn(b'filename="company_presentation.pdf"\r\nContent-Type: application/pdf',body)
+        self.assertIn(b'%PDF-1.4 demo',body)
+    async def test_missing_file_is_definite_failure_without_network(self):
+        result,urlopen=await self.send(self.dir/'gone.pdf')
+        self.assertIsInstance(result,APIError);self.assertNotIsInstance(result,DeliveryUnknown)
+        urlopen.assert_not_called()
+    async def test_empty_file_rejected_without_network(self):
+        empty=self.dir/'empty.pdf';empty.write_bytes(b'')
+        result,urlopen=await self.send(empty)
+        self.assertIsInstance(result,APIError);urlopen.assert_not_called()
+
 class FakeTelegram:
     def __init__(self,result=None,error=None):self.result,self.error,self.calls=result,error,[]
     async def call(self,method,payload=None,document=None):

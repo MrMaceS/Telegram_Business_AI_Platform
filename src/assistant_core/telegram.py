@@ -6,6 +6,8 @@ import urllib.request
 import urllib.error
 import uuid
 
+MAX_UPLOAD = 50 * 1024 * 1024  # Bot API sendDocument limit
+
 class APIError(Exception):
     """Telegram definitely did not perform the operation."""
     def __init__(self, message='Telegram request failed', code=None, description='', retry_after=None):
@@ -51,9 +53,17 @@ class Telegram:
             pieces = []
             for k, v in payload.items():
                 pieces.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode())
+            # Read before any network I/O: a missing/locked file is a definite "not sent", never a crash.
+            try:
+                content = document.read_bytes()
+            except OSError:
+                raise APIError('Document unavailable') from None
+            if not content or len(content) > MAX_UPLOAD:
+                raise APIError('Document empty or over 50 MB')
             name = document.name.replace('"','_').replace('\r','_').replace('\n','_')
-            pieces.append((f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode())
-            pieces.extend([document.read_bytes(), f'\r\n--{boundary}--\r\n'.encode()])
+            mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+            pieces.append((f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{name}"\r\nContent-Type: {mime}\r\n\r\n').encode())
+            pieces.extend([content, f'\r\n--{boundary}--\r\n'.encode()])
             data = b''.join(pieces); content_type = 'multipart/form-data; boundary=' + boundary
         request = urllib.request.Request(self._root + method, data=data, headers={'Content-Type':content_type})
         mutating = method.startswith(('send', 'edit', 'delete'))
