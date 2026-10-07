@@ -1,15 +1,35 @@
-param([ValidateSet('setup','check','run','inspect','test','benchmark')][string]$Action = 'check')
+param([ValidateSet('setup','check','run','inspect','test','benchmark','autostart-install','autostart-remove','harden','power','backup','health','status')][string]$Action = 'check')
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 Set-Location -LiteralPath $ProjectRoot
 $env:PYTHONPATH = Join-Path $ProjectRoot 'src'
 $env:PYTHONUTF8 = '1'
+# ТЗ 5.0: локальная LLM не нужна -> режим фиксированных ответов, Ollama не используется.
+$env:AI_MODE = 'faq'
 $env:OLLAMA_NO_CLOUD = '1'
-$env:OLLAMA_URL = 'http://127.0.0.1:11434'
-$env:LOCAL_MODEL = 'qwen3:1.7b'
-$env:AI_MODE = 'ollama'
+$TaskName = 'TelegramAssistant'
 $PythonExe = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
 $TokenPath = Join-Path $ProjectRoot 'private\bot-token.dpapi'
+
+
+function Find-Python {
+    # Подходит ЛЮБАЯ установленная версия >= 3.12 (3.12, 3.13, 3.14 ...).
+    # Порядок: 3.12 (на ней прогнаны тесты), 3.13, 3.14, затем python из PATH.
+    # Можно указать явно: $env:PYTHON_VERSION = '3.13'
+    $versions = if ($env:PYTHON_VERSION) { @($env:PYTHON_VERSION) } else { @('3.12','3.13','3.14') }
+    $check = 'import sys; assert sys.version_info >= (3,12)'
+    foreach ($v in $versions) {
+        try {
+            & py "-$v" -c $check 2>$null
+            if ($LASTEXITCODE -eq 0) { return @{ Exe = 'py'; Args = @("-$v") } }
+        } catch {}
+    }
+    try {
+        & python -c $check 2>$null
+        if ($LASTEXITCODE -eq 0) { return @{ Exe = 'python'; Args = @() } }
+    } catch {}
+    return $null
+}
 
 function Read-BotToken {
     if (!(Test-Path -LiteralPath $TokenPath)) { throw 'Run setup first.' }
@@ -20,12 +40,15 @@ function Read-BotToken {
 }
 
 if ($Action -eq 'setup') {
-    & py -3 -c 'import sys; assert sys.version_info >= (3,12)'
-    if ($LASTEXITCODE -ne 0) { throw 'Install Python 3.12+ from python.org.' }
+    $Py = Find-Python
+    if (!$Py) { throw 'Python 3.12 or newer (64-bit) not found. Install from python.org (with the py launcher).' }
     if (!(Test-Path -LiteralPath $PythonExe)) {
-        & py -3 -m venv .venv
+        & $Py.Exe @($Py.Args) -m venv .venv
         if ($LASTEXITCODE -ne 0) { throw 'Could not create virtual environment.' }
     }
+    & $PythonExe -c 'import sys; assert sys.version_info >= (3,12)'
+    if ($LASTEXITCODE -ne 0) { throw 'Existing .venv uses Python older than 3.12. Delete .venv and run setup again.' }
+    & $PythonExe --version
     if (!(Test-Path -LiteralPath 'config.json')) {
         Copy-Item -LiteralPath 'examples\config.example.json' -Destination 'config.json'
     }
@@ -36,10 +59,74 @@ if ($Action -eq 'setup') {
         $SecureToken = Read-Host 'Paste BotFather token (hidden)' -AsSecureString
         $SecureToken | ConvertFrom-SecureString | Set-Content -LiteralPath $TokenPath -Encoding ASCII
     }
-    Write-Host 'Setup created files only. Configure IDs/FAQ, install local Ollama and follow README.'
+    Write-Host 'Setup created files only. Next: edit config.json, then: harden, power, check, test, inspect, run, autostart-install.'
     exit 0
 }
 if (!(Test-Path -LiteralPath $PythonExe)) { throw 'Run setup first.' }
+
+function Assert-Admin {
+    $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (!$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run PowerShell as Administrator for this action.' }
+}
+
+switch ($Action) {
+'autostart-install' {
+    $Args1 = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $ProjectRoot 'windows.ps1') + '" run'
+    $act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $Args1 -WorkingDirectory $ProjectRoot
+    $trg  = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    $set  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
+    $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger $trg -Settings $set -Principal $prin -Force | Out-Null
+    Write-Host "Task '$TaskName' registered (at logon of $env:USERNAME). After reboot the bot starts in STOP: owner sends /resume."
+    exit 0
+}
+'autostart-remove' {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Host "Task '$TaskName' removed."; exit 0
+}
+'harden' {
+    # NTFS: only current user, SYSTEM, Administrators. Run once after setup.
+    foreach ($d in 'private','data','examples\materials') {
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        & icacls $d /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls failed for $d" }
+        Write-Host "ACL restricted: $d"
+    }
+    if (Test-Path config.json) { & icacls config.json /inheritance:r /grant:r "${env:USERNAME}:F" 'SYSTEM:F' 'Administrators:F' | Out-Null }
+    exit 0
+}
+'power' {
+    Assert-Admin
+    # Не уходить в сон от сети; экран можно гасить; закрытие крышки при питании от сети - ничего не делать.
+    & powercfg /change standby-timeout-ac 0
+    & powercfg /change hibernate-timeout-ac 0
+    & powercfg /change monitor-timeout-ac 10
+    & powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+    & powercfg /setactive SCHEME_CURRENT
+    Write-Host 'Power plan updated (AC: no sleep, no hibernate, lid close = do nothing).'
+    exit 0
+}
+'backup' {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $dest = Join-Path (Split-Path $ProjectRoot -Parent) "TelegramAssistant-backups\backup-$stamp"
+    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+    & $PythonExe -m assistant_core.ops backup .\data $dest
+    if ($LASTEXITCODE -ne 0) { throw 'Backup failed. Did you /stop and close the bot?' }
+    Write-Host "Backup created: $dest"; exit 0
+}
+'health' { & $PythonExe -m assistant_core.ops health .\data; if ($LASTEXITCODE -eq 0) { Write-Host 'OK: heartbeat is fresh' } else { Write-Host 'FAIL: bot not running or stuck' }; exit $LASTEXITCODE }
+'status' {
+    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Write-Host ('Autostart task : ' + $(if ($t) { $t.State } else { 'NOT INSTALLED' }))
+    Write-Host ('Token file     : ' + $(if (Test-Path $TokenPath) { 'present' } else { 'MISSING' }))
+    Write-Host ('config.json    : ' + $(if (Test-Path config.json) { 'present' } else { 'MISSING' }))
+    & $PythonExe --version
+    & $PythonExe -m assistant_core.ops health .\data 2>$null
+    Write-Host ('Heartbeat      : ' + $(if ($LASTEXITCODE -eq 0) { 'fresh (bot running)' } else { 'stale/none' }))
+    exit 0
+}
+}
 try {
     switch ($Action) {
         'check' { & $PythonExe -m assistant_core.main --config config.json --check }
