@@ -216,6 +216,10 @@ class Engine:
         cand = self.db.candidate(chat)
         stage = cand['stage'] if cand else None
         if stage == 'CONSENT_RECORDED':
+            # Проверка доступности PDF ДО отправки (фикс для test_B08)
+            if not self.cfg.presentation_file.is_file():
+                await self._step_problem(chat, key, 'презентация', 'FAILED', epoch)
+                return False
             status, _ = await self._step(chat, f'pdf:{chat}:{version}', PDF_CAPTION, epoch,
                                          document=self.cfg.presentation_file)
             if status != 'SENT':

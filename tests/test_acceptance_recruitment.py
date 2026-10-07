@@ -190,10 +190,16 @@ class RecruitmentAcceptance(Acceptance):
         await self.owner_cmd('/resume')
         await self.candidate('Интересует вакансия')
         await self.candidate(CONSENT)
-        # Текущий Engine не проверяет существование presentation_file в момент отправки;
-        # проверка доступности файла остаётся ответственностью Telegram/API-слоя.
+        # PDF недоступен: ссылка не должна выдаваться, кандидат в AWAITING_OWNER.
         self.assertTrue(self.cfg.presentation_file.exists() is False)
-        self.assertEqual(len(self.invites()), 1)
+        self.assertEqual(len(self.invites()), 0, 'ссылка не выдаётся без PDF')
+        self.assertEqual(len(self.pdfs()), 0, 'PDF не отправлен')
+        self.assertIn('AWAITING_OWNER', self.dump())
+        # Владелец уведомлён о проблеме.
+        owner_texts = self.texts(OWNER)
+        self.assertTrue(
+            any('презентац' in t.lower() or 'pdf' in t.lower() for t in owner_texts),
+            'владелец уведомлён о недоступности PDF')
 
     async def test_B09_edited_consent_goes_to_owner(self):
         await self.owner_cmd('/resume')
