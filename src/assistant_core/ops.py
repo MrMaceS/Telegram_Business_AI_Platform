@@ -5,6 +5,7 @@ import json
 import shutil
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 def backup(source, destination):
@@ -14,7 +15,8 @@ def backup(source, destination):
     if destination.exists() or destination.is_relative_to(source):
         raise ValueError('Use a new backup directory outside data directory')
     destination.mkdir(parents=True,mode=0o700)
-    with sqlite3.connect(source/'state.sqlite3') as src, sqlite3.connect(destination/'state.sqlite3') as dst:
+    # closing(): `with connect()` only commits; an open handle locks the file on Windows.
+    with closing(sqlite3.connect(source/'state.sqlite3')) as src, closing(sqlite3.connect(destination/'state.sqlite3')) as dst:
         src.backup(dst)
     if (source/'files').exists():shutil.copytree(source/'files',destination/'files')
     manifest={str(p.relative_to(destination)):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -30,7 +32,7 @@ def restore(source,destination):
         if not p.is_relative_to(source) or hashlib.sha256(p.read_bytes()).hexdigest()!=digest:
             raise ValueError('Backup integrity check failed')
     shutil.copytree(source,destination)
-    with sqlite3.connect(destination/'state.sqlite3') as db:
+    with closing(sqlite3.connect(destination/'state.sqlite3')) as db, db:
         db.execute("UPDATE meta SET value='1' WHERE key='paused'")
         db.execute("UPDATE outgoing SET status='UNKNOWN' WHERE status='SENDING'")
         db.execute("UPDATE inbox SET status='REVIEW' WHERE status IN ('RECEIVED','PENDING','RUNNING')")
