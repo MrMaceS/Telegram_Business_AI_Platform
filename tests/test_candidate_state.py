@@ -2,6 +2,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+import sys
+from pathlib import Path
+
+# Тесты запускаются и без PYTHONPATH (например, из Git Bash): добавляем src сами.
+_SRC = str(Path(__file__).resolve().parents[1] / 'src')
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
 from assistant_core.storage import Store
 
 V1='2026-10-06-v1'
