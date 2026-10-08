@@ -91,18 +91,22 @@ class FakeBotAPI:
             time.sleep(0.05)
         raise AssertionError(f'Timed out waiting for {what}; sent={self.sent}')
 
-    def settle(self, quiet=0.4, timeout=10.0):
-        """Wait until the bot has consumed all updates and sent nothing for `quiet` seconds."""
+    def activity(self):
+        # Long polling repeats getUpdates every ~2 s even when idle: it is not activity.
+        return sum(1 for m in self.calls if m != 'getUpdates')
+
+    def settle(self, quiet=0.4, timeout=20.0):
+        """Wait until the bot has consumed all updates and called nothing else for `quiet` seconds."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
                 consumed = self.offset > self.updates[-1]['update_id'] if self.updates else True
-                count = len(self.calls)
+                count = self.activity()
             time.sleep(quiet)
             with self.lock:
-                if consumed and len(self.calls) == count:
+                if consumed and self.activity() == count:
                     return
-        raise AssertionError('Bot did not settle')
+        raise AssertionError(f'Bot did not settle: offset={self.offset}, calls={self.calls[-10:]}')
 
     offset = 0
 
