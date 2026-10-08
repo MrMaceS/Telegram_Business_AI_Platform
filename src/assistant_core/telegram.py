@@ -1,6 +1,7 @@
 """Official HTTPS Bot API adapter; stdlib only, no user sessions."""
 import asyncio
 import json
+import os
 import mimetypes
 import urllib.request
 import urllib.error
@@ -34,12 +35,23 @@ def rejection(body):
     cls = {403: Forbidden, 429: RateLimited, 409: Conflict}.get(code, APIError)
     return cls(f'Telegram HTTP {code}', code, description, retry_after)
 
+def api_base():
+    """TELEGRAM_API_URL points the bot at a local fake Bot API for end-to-end tests.
+    Loopback only: the token is part of every URL and must never go to another host."""
+    url = os.environ.get('TELEGRAM_API_URL', '').rstrip('/')
+    if not url:
+        return 'https://api.telegram.org'
+    if not url.startswith(('http://127.0.0.1:', 'http://localhost:')):
+        raise ValueError('TELEGRAM_API_URL must be http://127.0.0.1:PORT or http://localhost:PORT')
+    return url
+
 class Telegram:
     def __init__(self, token):
         if not token or ':' not in token:
             raise ValueError('Missing/invalid BOT_TOKEN')
-        self._root = 'https://api.telegram.org/bot' + token + '/'
-        self._file_root = 'https://api.telegram.org/file/bot' + token + '/'
+        base = api_base()
+        self._root = base + '/bot' + token + '/'
+        self._file_root = base + '/file/bot' + token + '/'
 
     async def call(self, method, payload=None, document=None):
         return await asyncio.to_thread(self._call, method, payload or {}, document)
