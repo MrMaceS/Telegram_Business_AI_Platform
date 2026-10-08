@@ -42,6 +42,27 @@ class Response(io.BytesIO):
         return False
 
 
+class ApiBaseTests(unittest.TestCase):
+    """TELEGRAM_API_URL only redirects to this machine: the token is part of every URL."""
+
+    def make(self, url):
+        with mock.patch.dict('os.environ', {'TELEGRAM_API_URL': url}):
+            return Telegram(TOKEN)
+
+    def test_default_is_official_api(self):
+        with mock.patch.dict('os.environ', {}, clear=True):
+            self.assertTrue(Telegram(TOKEN)._root.startswith('https://api.telegram.org/bot'))
+
+    def test_loopback_allowed(self):
+        self.assertEqual(self.make('http://127.0.0.1:8081/')._root, 'http://127.0.0.1:8081/bot' + TOKEN + '/')
+        self.assertTrue(self.make('http://localhost:9000')._root.startswith('http://localhost:9000/bot'))
+
+    def test_other_hosts_rejected(self):
+        for url in ('https://evil.example', 'http://10.0.0.5:80', 'http://127.0.0.1.evil.com:80'):
+            with self.assertRaises(ValueError):
+                self.make(url)
+
+
 class TelegramErrorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tg = Telegram(TOKEN)

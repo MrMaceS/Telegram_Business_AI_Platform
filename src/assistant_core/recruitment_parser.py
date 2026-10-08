@@ -68,13 +68,13 @@ def _has_phrase(norm: str, phrase: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", norm) is not None
 
 
-def is_vacancy_inquiry(text: str) -> bool:
-    """Определяет первичное обращение по вакансии."""
+def is_vacancy_inquiry(text: str, triggers=None) -> bool:
+    """Определяет первичное обращение по вакансии. triggers — фразы из сценария (иначе встроенные)."""
     norm = _normalize(text)
-    return any(trig in norm for trig in VACANCY_TRIGGERS)
+    return any(_normalize(trig) in norm for trig in (triggers or VACANCY_TRIGGERS))
 
 
-def is_explicit_consent(text: str) -> bool:
+def is_explicit_consent(text: str, phrases=None) -> bool:
     """
     Строгая проверка согласия. Согласием НЕ являются: вопросы, отрицания,
     оговорки ('но', 'если'), 'ознакомился/прочитал', слишком длинные сообщения.
@@ -90,10 +90,10 @@ def is_explicit_consent(text: str) -> bool:
         return False
     if norm in ("да", "ок", "хорошо"):
         return True
-    return any(_has_phrase(norm, p) for p in EXPLICIT_CONSENT_PHRASES)
+    return any(_has_phrase(norm, _normalize(p)) for p in (phrases or EXPLICIT_CONSENT_PHRASES))
 
 
-def is_explicit_decline(text: str) -> bool:
+def is_explicit_decline(text: str, triggers=None) -> bool:
     """Явный отказ. Неоднозначные сообщения ('нет, но...') уходят владельцу."""
     if "?" in text:
         return False
@@ -104,4 +104,4 @@ def is_explicit_decline(text: str) -> bool:
         return False
     if "нет" in ws and len(words) <= 3 and not ws & _NO_BUT_NOT_DECLINE:
         return True
-    return any(_has_phrase(norm, t) for t in DECLINE_TRIGGERS)
+    return any(_has_phrase(norm, _normalize(t)) for t in (triggers or DECLINE_TRIGGERS))
