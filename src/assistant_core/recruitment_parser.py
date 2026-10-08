@@ -1,8 +1,12 @@
 """
 src/assistant_core/recruitment_parser.py
 Детерминированное распознавание: обращение по вакансии, явное согласие, отказ.
+
+Принцип: при любом сомнении возвращаем False. Тогда диалог уходит владельцу,
+а бот не отправляет презентацию и не закрывает диалог по ошибке.
 """
 import re
+
 
 VACANCY_TRIGGERS = (
     "интересует вакансия",
@@ -12,51 +16,56 @@ VACANCY_TRIGGERS = (
     "отклик",
     "по поводу работы",
     "насчет работы",
-    "на счёт работы",
+    "на счет работы",
     "по работе",
-    "new work"
+    "new work",
 )
 
+# Согласие и отказ ищутся только целыми словами (см. _has_phrase).
 EXPLICIT_CONSENT_PHRASES = (
-    "да условия мне подходят я согласен перейти к следующему этапу",
-    "да условия мне подходят я согласна перейти к следующему этапу",
-    "да условия мне подходят я согласен на перейти к следующему этапу",
-    "да условия подходят я согласен",
-    "да условия подходят я согласна",
-    "условия подходят я согласен",
-    "условия подходят я согласна",
-    "я согласен с условиями",
-    "я согласна с условиями",
-    "согласен с условиями",
-    "согласна с условиями",
-    "принимаю условия",
-    "условия устраивают",
-    "да я согласен",
-    "да я согласна",
-    "да согласен",
-    "да согласна",
     "согласен",
     "согласна",
-    "подходит"
+    "подходит",
+    "подходят",
+    "принимаю условия",
+    "условия устраивают",
 )
 
 DECLINE_TRIGGERS = (
-    "нет",
     "не подходит",
     "не подходят",
     "отказываюсь",
     "не согласен",
     "не согласна",
+    "несогласен",
+    "несогласна",
     "не интересно",
+    "неинтересно",
     "уже нашел",
     "уже нашла",
-    "не устраивает"
+    "не устраивает",
 )
+
+# Слова, при которых сообщение нельзя считать однозначным.
+_NEGATIONS = frozenset({"не", "нет", "ни", "никак"})
+_HEDGES = frozenset({
+    "но", "однако", "если", "а", "хотя", "только", "пока", "подумаю", "вопрос",
+})
+_READ_WORDS = frozenset({"ознакомился", "ознакомилась", "прочитал", "прочитала"})
+_NO_BUT_NOT_DECLINE = frozenset({"проблем", "проблема", "вопросов"})  # "нет проблем"
+_MAX_CONSENT_WORDS = 15
 
 
 def _normalize(text: str) -> str:
-    cleaned = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE)
+    text = text.lower().replace("ё", "е")
+    cleaned = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
     return " ".join(cleaned.split())
+
+
+def _has_phrase(norm: str, phrase: str) -> bool:
+    """Фраза как целые слова: 'не подходит' не найдётся в 'мне подходит',
+    а 'согласен' не найдётся в 'несогласен'."""
+    return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", norm) is not None
 
 
 def is_vacancy_inquiry(text: str) -> bool:
@@ -67,28 +76,32 @@ def is_vacancy_inquiry(text: str) -> bool:
 
 def is_explicit_consent(text: str) -> bool:
     """
-    Строгая проверка согласия.
-    Вопросы ('Да?'), оговорки ('но', 'если') и реплики 'ознакомился/прочитал' согласием НЕ являются.
+    Строгая проверка согласия. Согласием НЕ являются: вопросы, отрицания,
+    оговорки ('но', 'если'), 'ознакомился/прочитал', слишком длинные сообщения.
     """
     if "?" in text:
         return False
     norm = _normalize(text)
-    words = set(norm.split())
-    if any(stop_word in words for stop_word in ("но", "однако", "если")):
+    words = norm.split()
+    if not words or len(words) > _MAX_CONSENT_WORDS:
         return False
-    if any(read_word in words for read_word in ("ознакомился", "ознакомилась", "прочитал", "прочитала")):
+    ws = set(words)
+    if ws & _NEGATIONS or ws & _HEDGES or ws & _READ_WORDS:
         return False
-    if norm in ("да", "согласен", "согласна"):
+    if norm in ("да", "ок", "хорошо"):
         return True
-    return any(phrase in norm for phrase in EXPLICIT_CONSENT_PHRASES)
+    return any(_has_phrase(norm, p) for p in EXPLICIT_CONSENT_PHRASES)
 
 
 def is_explicit_decline(text: str) -> bool:
-    """Определяет явный отказ кандидата."""
+    """Явный отказ. Неоднозначные сообщения ('нет, но...') уходят владельцу."""
     if "?" in text:
         return False
     norm = _normalize(text)
-    words = set(norm.split())
-    if "нет" in words and len(words) <= 3:
+    words = norm.split()
+    ws = set(words)
+    if ws & _HEDGES:
+        return False
+    if "нет" in ws and len(words) <= 3 and not ws & _NO_BUT_NOT_DECLINE:
         return True
-    return any(trig in norm for trig in DECLINE_TRIGGERS)
+    return any(_has_phrase(norm, t) for t in DECLINE_TRIGGERS)

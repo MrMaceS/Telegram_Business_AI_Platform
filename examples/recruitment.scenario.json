@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "implementation_status": "TO_IMPLEMENT_BY_TEAM; not consumed by starter 0.2.0",
   "conditions_version": "2026-10-06-v1",
   "conditions_file": "examples/materials/vacancy_conditions.txt",
   "presentation_file": "examples/materials/company_presentation.pdf",

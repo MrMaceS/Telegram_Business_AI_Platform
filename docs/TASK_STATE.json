@@ -1,12 +1,16 @@
 {
-  "revision": "TZ 5.0, starter 0.2.0 unchanged",
+  "revision": "TZ 5.0, starter 0.2.0",
   "scope": "recruitment onboarding only",
   "scenario": "vacancy -> conditions -> explicit consent -> presentation -> invite",
-  "code_status": "recruitment NOT IMPLEMENTED; team must implement and install",
+  "code_status": "IMPLEMENTED; requires runtime verification on Windows",
   "runtime": "NOT RUN",
   "group": "New work",
   "welcome": "pinned by owner per screenshots",
   "fixed_48h_for_all_candidates": false,
   "team_roles": "recommendation, docs/TEAM_ROLES.md",
-  "audit": "PASS for spec/material handoff, not runtime acceptance"
+  "audit": "PASS for spec/material handoff, not runtime acceptance",
+  "tests": {
+    "offline_mocks": "PASS (23 core + 19 acceptance A01-B10 + coverage)",
+    "real_windows_telegram": "NOT RUN"
+  }
 }
