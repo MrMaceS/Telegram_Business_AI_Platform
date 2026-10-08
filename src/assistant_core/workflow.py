@@ -31,6 +31,15 @@ def _is_pleasantry(text):
     return 0 < len(words) <= 3 and all(w in PLEASANTRIES for w in words)
 
 
+MAX_REPEAT_WORDS = 8
+
+
+def _is_repeat_before_consent(text, vacancy_phrases=()):
+    if '?' in text or len(_plain(text).split()) > MAX_REPEAT_WORDS:
+        return False
+    return is_vacancy_inquiry(text, vacancy_phrases) or _is_pleasantry(text)
+
+
 class Engine:
     def __init__(self, cfg, store, telegram, ai=None):
         self.cfg, self.db, self.tg, self.ai = cfg, store, telegram, ai
@@ -532,8 +541,15 @@ class Engine:
                     await self._step_problem(chat, key, 'отказ', status, epoch)
                 return
 
+            # Повторное «интересует вакансия» или «спасибо» до согласия: условия уже у кандидата,
+            # ничего не дублируем и не останавливаем диалог. Длинное сообщение может содержать
+            # вопрос без «?», поэтому молча пропускаем только короткие.
+            if _is_repeat_before_consent(text, self.cfg.vacancy_phrases):
+                self.db.log('REPEAT_IGNORED', chat, key)
+                return
+
             # Неизвестный вопрос, сомнение или одновременно согласие и отказ -> владелец
-            why = 'неоднозначный ответ' if (consent and decline) else 'вопрос на этапе условий'
+            why ='неоднозначный ответ' if (consent and decline) else 'вопрос на этапе условий'
             await self._escalate(chat, text, why, key, epoch)
             return
 

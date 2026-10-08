@@ -132,17 +132,23 @@ class BotE2E(unittest.TestCase):
         self.say('Интересует вакансия')
         self.assertEqual((len(self.conditions()), len(self.pdfs()), len(self.invites())), (1, 1, 1))
 
-    @unittest.expectedFailure
     def test_02b_repeated_inquiry_before_consent(self):
-        """ИЗВЕСТНАЯ ОШИБКА (workflow.py, этап CONDITIONS_SENT): повторное «интересует вакансия»
-        считается неизвестным вопросом -> «Передам ваш вопрос…», диалог ждёт владельца,
-        и следующее «согласен» уже не обрабатывается. По ТЗ повтор должен просто ничего не дублировать."""
+        """Повтор «интересует вакансия» / «спасибо» после условий не дублирует и не останавливает диалог."""
         self.ready()
         self.say('Интересует вакансия')
-        self.say('Интересует вакансия')
+        self.say('Здравствуйте, интересует вакансия!')
+        self.say('Спасибо')
         self.assertEqual(len(self.texts()), 1, 'повтор не вызывает новых сообщений')
         self.say(CONSENT)
         self.assertEqual((len(self.pdfs()), len(self.invites())), (1, 1))
+
+    def test_02c_long_message_with_inquiry_still_goes_to_owner(self):
+        """Вопрос без «?» внутри длинного сообщения не теряется."""
+        self.ready()
+        self.say('Интересует вакансия')
+        self.say('Интересует вакансия, хотел бы ещё уточнить график работы и оплату в первый месяц')
+        self.assertEqual(self.texts()[-1], 'Передам ваш вопрос Владимиру для ответа.')
+        self.assertTrue(any('график' in t for t in self.owner_texts()))
 
     def test_03_decline(self):
         self.ready()
@@ -293,6 +299,69 @@ class BotE2E(unittest.TestCase):
         self.api.settle()
         self.assertEqual((len(self.pdfs()), len(self.invites())), (1, 1))
         self.assertEqual((self.pdfs(OTHER_CANDIDATE), self.invites(OTHER_CANDIDATE)), ([], []))
+
+
+    # ------------------------------------------------------------------ editable scenario
+
+    def edit_scenario(self, **changes):
+        path = self.root / 'scenario.json'
+        sc = json.loads(path.read_text(encoding='utf-8'))
+        sc.update(changes)
+        path.write_text(json.dumps(sc, ensure_ascii=False), encoding='utf-8')
+
+    def test_19_scenario_custom_texts_phrases_and_order(self):
+        self.edit_scenario(
+            decline_message='Понял, удачи!',
+            phrases={'vacancy': ['ищу подработку'], 'consent': ['беру'], 'decline': ['пас']},
+            after_consent=[
+                {'id': 'link', 'type': 'text', 'text': 'Вот группа: {url}', 'name': 'приглашение'},
+                {'id': 'deck', 'type': 'document', 'caption': 'И презентация'},
+                {'id': 'bye', 'type': 'text', 'text': 'До встречи!'},
+            ])
+        self.ready()
+        self.say('Интересует вакансия')
+        self.assertEqual(self.api.to(CANDIDATE), [], 'старая фраза заменена')
+        self.say('Привет, ищу подработку')
+        self.assertEqual(self.conditions(), [CONDITIONS])
+        self.say('Беру')
+        got = [(m['method'], m['text'] or m['caption']) for m in self.api.to(CANDIDATE)[1:]]
+        self.assertEqual(got, [('sendMessage', 'Вот группа: https://t.me/+EvhipOH4o6IwMTFl'),
+                               ('sendDocument', 'И презентация'),
+                               ('sendMessage', 'До встречи!')])
+        self.say('Беру')
+        self.assertEqual(len(self.api.to(CANDIDATE)), 4, 'без дублей')
+        self.say('Ищу подработку', chat=OTHER_CANDIDATE)
+        self.say('Пас', chat=OTHER_CANDIDATE)
+        self.assertEqual(self.texts(OTHER_CANDIDATE)[-1], 'Понял, удачи!')
+
+    def test_20_scenario_edit_applies_after_restart(self):
+        self.ready()
+        self.say('Интересует вакансия')
+        self.say('Да, согласен')
+        self.assertEqual(len(self.invites()), 1)
+        self.stop_bot()
+        self.edit_scenario(after_consent=[
+            {'id': 'pdf', 'type': 'document', 'caption': 'Новая подпись'},
+            {'id': 'inv', 'type': 'text', 'text': 'Новый текст приглашения: {url}'}])
+        self.start_bot()
+        self.owner_says('/resume')
+        self.say('Спасибо')
+        self.assertEqual(len(self.api.to(CANDIDATE)), 3, 'первый кандидат ничего повторно не получил')
+        self.say('Интересует вакансия', chat=OTHER_CANDIDATE)
+        self.say('Согласен', chat=OTHER_CANDIDATE)
+        self.assertEqual(self.texts(OTHER_CANDIDATE)[1:],
+                         ['Новая подпись', 'Новый текст приглашения: https://t.me/+EvhipOH4o6IwMTFl'])
+
+    def test_21_scenario_broken_stops_startup(self):
+        self.edit_scenario(after_consent=[{'id': 'a', 'type': 'text', 'text': ''}])
+        env = dict(os.environ, BOT_TOKEN=TOKEN, TELEGRAM_API_URL=self.api.url, AI_MODE='faq',
+                   PYTHONPATH=str(ROOT / 'src'))
+        out = subprocess.run([sys.executable, '-m', 'assistant_core.main', '--config', str(self.config)],
+                             cwd=ROOT, env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('after_consent #1', out.stderr + out.stdout)
+        self.assertEqual(self.api.calls, [], 'с ошибочным сценарием бот не стартует и в Telegram не ходит')
+
 
 
 if __name__ == '__main__':
