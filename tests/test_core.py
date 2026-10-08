@@ -5,11 +5,20 @@ import time
 import unittest
 from pathlib import Path
 
+import sys
+from pathlib import Path
+
+# Тесты запускаются и без PYTHONPATH (например, из Git Bash): добавляем src сами.
+_SRC = str(Path(__file__).resolve().parents[1] / 'src')
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
 from assistant_core.config import Config
 from assistant_core.locking import ProcessLock
 from assistant_core.storage import Store
 from assistant_core.telegram import APIError, DeliveryUnknown
 from assistant_core.workflow import Engine
+import assistant_core.locking as locking
 
 
 class FakeTelegram:
@@ -133,7 +142,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.candidate(2)['stage'], 'AWAITING_OWNER')
         self.assertEqual(self.db.conversation(2)['mode'], 'AWAITING_OWNER')
         self.assertTrue(any(x[1].get('chat_id') == 1 for x in self.tg.sent))
-        self.assertEqual(len(self.chat_sends()), 1)
+        # условия + ровно одно уведомление кандидату (ТЗ раздел 2)
+        self.assertEqual(len(self.chat_sends()), 2)
 
     async def test_decline_closes_auto_conversation(self):
         first = await self.admitted(self.update(1))
@@ -207,6 +217,32 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.db.recover()
         self.assertEqual(self.db.get('paused'), '1')
         self.assertEqual(self.db.db.execute('SELECT status FROM outgoing').fetchone()[0], 'UNKNOWN')
+
+
+def test_process_lock_windows_branch(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(fd, mode, size):
+            calls.append((fd, mode, size))
+
+    monkeypatch.setattr(locking.os, "name", "nt")
+
+    import sys
+    monkeypatch.setitem(sys.modules, "msvcrt", FakeMsvcrt)
+
+    lock = locking.ProcessLock(str(tmp_path / "lock"))
+
+    assert calls
+    assert calls[0][1] == FakeMsvcrt.LK_NBLCK
+
+    lock.close()
+
+    assert calls[-1][1] == FakeMsvcrt.LK_UNLCK
 
 
 if __name__ == '__main__':

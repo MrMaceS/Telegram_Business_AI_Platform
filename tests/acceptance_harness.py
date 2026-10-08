@@ -14,6 +14,14 @@ import time
 import unittest
 from pathlib import Path
 
+import sys
+from pathlib import Path
+
+# Тесты запускаются и без PYTHONPATH (например, из Git Bash): добавляем src сами.
+_SRC = str(Path(__file__).resolve().parents[1] / 'src')
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
 from assistant_core.config import Config
 from assistant_core.storage import Store
 from assistant_core.workflow import Engine

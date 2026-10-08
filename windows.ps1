@@ -1,4 +1,4 @@
-param([ValidateSet('setup','check','run','inspect','test','benchmark','autostart-install','autostart-remove','harden','power','backup','health','status')][string]$Action = 'check')
+param([ValidateSet('setup','check','run','inspect','test','benchmark','autostart-install','autostart-remove','harden','power','backup','health','status','coverage')][string]$Action = 'check')
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 Set-Location -LiteralPath $ProjectRoot
@@ -64,6 +64,15 @@ if ($Action -eq 'setup') {
 }
 if (!(Test-Path -LiteralPath $PythonExe)) { throw 'Run setup first.' }
 
+function Assert-RealConfig {
+    # Пример из examples\config.example.json содержит выдуманные ID. Реальные ID берутся при установке (inspect).
+    if (!(Test-Path -LiteralPath 'config.json')) { throw 'config.json not found. Run setup first.' }
+    $c = Get-Content -Raw -LiteralPath 'config.json' -Encoding UTF8 | ConvertFrom-Json
+    if ($c.owner_id -eq 100000001 -or $c.business_owner_id -eq 100000001 -or ($c.contacts -contains 100000002)) {
+        throw 'config.json still has placeholder IDs (100000001/100000002). Fill real IDs from inspect (TZ: do not invent IDs).'
+    }
+}
+
 function Assert-Admin {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if (!$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run PowerShell as Administrator for this action.' }
@@ -89,11 +98,12 @@ switch ($Action) {
     # NTFS: only current user, SYSTEM, Administrators. Run once after setup.
     foreach ($d in 'private','data','examples\materials') {
         New-Item -ItemType Directory -Force -Path $d | Out-Null
-        & icacls $d /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+        # SID вместо имён: работает на любой локализации Windows (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators).
+        & icacls $d /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "icacls failed for $d" }
         Write-Host "ACL restricted: $d"
     }
-    if (Test-Path config.json) { & icacls config.json /inheritance:r /grant:r "${env:USERNAME}:F" 'SYSTEM:F' 'Administrators:F' | Out-Null }
+    if (Test-Path config.json) { & icacls config.json /inheritance:r /grant:r "${env:USERNAME}:F" '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null }
     exit 0
 }
 'power' {
@@ -113,7 +123,20 @@ switch ($Action) {
     New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
     & $PythonExe -m assistant_core.ops backup .\data $dest
     if ($LASTEXITCODE -ne 0) { throw 'Backup failed. Did you /stop and close the bot?' }
-    Write-Host "Backup created: $dest"; exit 0
+    # config.json (без секретов) и материалы - рядом с копией базы; токен DPAPI не копируется (на новом ПК вводится заново).
+    $extra = "$dest-config"
+    New-Item -ItemType Directory -Force -Path $extra | Out-Null
+    if (Test-Path config.json) { Copy-Item -LiteralPath config.json -Destination $extra }
+    Copy-Item -LiteralPath 'examples\materials' -Destination $extra -Recurse
+    Write-Host "Backup created: $dest (+ config and materials: $extra)"; exit 0
+}
+'coverage' {
+    & $PythonExe -c 'import coverage' 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'coverage not installed: .\.venv\Scripts\python.exe -m pip install coverage' }
+    & $PythonExe -m coverage run --source=src\assistant_core -m unittest discover -s tests
+    if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+    & $PythonExe -m coverage report -m --fail-under=100
+    exit $LASTEXITCODE
 }
 'health' { & $PythonExe -m assistant_core.ops health .\data; if ($LASTEXITCODE -eq 0) { Write-Host 'OK: heartbeat is fresh' } else { Write-Host 'FAIL: bot not running or stuck' }; exit $LASTEXITCODE }
 'status' {
@@ -129,11 +152,11 @@ switch ($Action) {
 }
 try {
     switch ($Action) {
-        'check' { & $PythonExe -m assistant_core.main --config config.json --check }
+        'check' { try { Assert-RealConfig } catch { Write-Warning $_.Exception.Message }; & $PythonExe -m assistant_core.main --config config.json --check }
         'test' { & $PythonExe -m unittest discover -s tests -v }
         'benchmark' { & $PythonExe tools\check_model.py }
         'inspect' { Read-BotToken; & $PythonExe tools\inspect_telegram.py }
-        'run' { Read-BotToken; & $PythonExe -m assistant_core.main --config config.json }
+        'run' { Assert-RealConfig; Read-BotToken; & $PythonExe -m assistant_core.main --config config.json }
     }
     $ResultCode = $LASTEXITCODE
 } finally { Remove-Item Env:BOT_TOKEN -ErrorAction SilentlyContinue }

@@ -91,13 +91,27 @@ class RecruitmentAcceptance(Acceptance):
         await self.candidate('Можно удалённо из другой страны?')
         await self.candidate('И ещё вопрос про график')
         self.assertEqual(
-            len(self.to_chat()) - before, 0,
-            'при переводе в ожидание владельца автоответ кандидату не отправляется')
+            len(self.to_chat()) - before, 1,
+            'кандидату ровно одно уведомление; дальше диалог на паузе до решения владельца')
         owner_texts = self.texts(OWNER)
         self.assertTrue(
             any('график' in t or 'удал' in t for t in owner_texts),
             'последний вопрос ушёл владельцу')
         self.assertIn('AWAITING_OWNER', self.dump())
+
+    async def test_A10_owner_resumes_candidate_without_resend(self):
+        await self.owner_cmd('/resume')
+        await self.candidate('Интересует вакансия')
+        await self.candidate('Можно удалённо?')
+        self.assertEqual(self.db.candidate(CANDIDATE)['stage'], 'AWAITING_OWNER')
+        self.assertEqual(self.db.candidate(CANDIDATE)['prev_stage'], 'CONDITIONS_SENT')
+        await self.owner_cmd(f'/reply {CANDIDATE} Да, можно.')
+        await self.owner_cmd(f'/resume_candidate {CANDIDATE}')
+        self.assertEqual(self.db.candidate(CANDIDATE)['stage'], 'CONDITIONS_SENT')
+        await self.candidate(CONSENT)
+        self.assertEqual(len(self.conditions_sent()), 1)
+        self.assertEqual(len(self.pdfs()), 1)
+        self.assertEqual(len(self.invites()), 1)
 
     async def test_A09_no_promises(self):
         await self.happy_path()
@@ -186,20 +200,25 @@ class RecruitmentAcceptance(Acceptance):
         self.assertEqual(self.db.get('paused'), '1')
 
     async def test_B08_pdf_unavailable_no_invite_owner_notified(self):
-        (self.root / 'materials' / 'company_presentation.pdf').unlink()
+        pdf = self.root / 'materials' / 'company_presentation.pdf'
+        saved = pdf.read_bytes()
+        pdf.unlink()
         await self.owner_cmd('/resume')
         await self.candidate('Интересует вакансия')
         await self.candidate(CONSENT)
-        # PDF недоступен: ссылка не должна выдаваться, кандидат в AWAITING_OWNER.
-        self.assertTrue(self.cfg.presentation_file.exists() is False)
-        self.assertEqual(len(self.invites()), 0, 'ссылка не выдаётся без PDF')
-        self.assertEqual(len(self.pdfs()), 0, 'PDF не отправлен')
-        self.assertIn('AWAITING_OWNER', self.dump())
-        # Владелец уведомлён о проблеме.
-        owner_texts = self.texts(OWNER)
-        self.assertTrue(
-            any('презентац' in t.lower() or 'pdf' in t.lower() for t in owner_texts),
-            'владелец уведомлён о недоступности PDF')
+        self.assertEqual(len(self.pdfs()), 0)
+        self.assertEqual(len(self.invites()), 0, 'без PDF ссылка не выдаётся')
+        cand = self.db.candidate(CANDIDATE)
+        self.assertEqual(cand['stage'], 'AWAITING_OWNER')
+        self.assertEqual(cand['prev_stage'], 'CONSENT_RECORDED')
+        self.assertTrue(any('презентация' in t for t in self.texts(OWNER)),
+                        'владелец уведомлён о сбое')
+        # Файл вернули, владелец возобновил: пакет выдаётся один раз, согласие не дублируется.
+        pdf.write_bytes(saved)
+        await self.owner_cmd(f'/resume_candidate {CANDIDATE}')
+        self.assertEqual(len(self.pdfs()), 1)
+        self.assertEqual(len(self.invites()), 1)
+        self.assertEqual(self.db.db.execute('SELECT COUNT(*) FROM consents').fetchone()[0], 1)
 
     async def test_B09_edited_consent_goes_to_owner(self):
         await self.owner_cmd('/resume')

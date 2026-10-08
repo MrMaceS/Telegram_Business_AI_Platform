@@ -396,9 +396,7 @@ class SyncAdmissionWorkflowCoverage(IsolatedAsyncioTestCase):
         self.db.mode(CHAT,'AUTO'); self.db.set('paused','0')
         self.db.incoming(CHAT,CONN,2000,CONSENT,time.time())
         original_set_stage=self.db.set_stage
-        self.db.set_stage=mock.Mock(side_effect=lambda *a, **kw: True)
         await self.e.business(update(2000,text=CONSENT,mid=2000)['business_message'],2000)
-        self.db.set_stage=original_set_stage
         self.assertTrue(any(x[0]=='sendDocument' for x in self.tg.sent))
         self.assertTrue(any('https://t.me/group' in x[1].get('text','') for x in self.tg.sent))
         # Explicit decline.
