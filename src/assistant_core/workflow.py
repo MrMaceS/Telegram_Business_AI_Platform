@@ -18,8 +18,6 @@ CANDIDATE_STOP_WORDS = frozenset({'stop', 'стоп', 'не отвечай'})
 PLEASANTRIES = frozenset({'спасибо', 'благодарю', 'понятно', 'понял', 'поняла', 'хорошо',
                           'ок', 'ok', 'отлично', 'ясно'})
 INCOMPLETE = ('CONSENT_RECORDED', 'PRESENTATION_SENT')
-DECLINE_TEXT = 'Спасибо за отклик! Желаем успехов.'
-PDF_CAPTION = 'Условия согласованы. Направляю презентацию компании:'
 DEFAULT_INVITE = ('Спасибо! Ваше согласие зафиксировано. Ознакомьтесь с презентацией компании '
                   'и присоединитесь к группе:')
 
@@ -208,33 +206,48 @@ class Engine:
         else:
             await self._step_problem(chat, key, 'условия', status, epoch)
 
+    def _package(self):
+        """Сообщения после согласия по порядку (after_consent в сценарии).
+        Без него — прежний пакет: PDF, затем ссылка; id 'pdf'/'inv' совпадают со старыми ключами
+        отправки, поэтому кандидаты «в пути» не получат повтор после обновления."""
+        if self.cfg.after_consent:
+            return self.cfg.after_consent
+        return (
+            {'id': 'pdf', 'type': 'document', 'file': self.cfg.presentation_file,
+             'caption': self.cfg.presentation_caption, 'name': 'презентация'},
+            {'id': 'inv', 'type': 'text', 'text': self._invite_text(), 'name': 'приглашение'},
+        )
+
     async def _finish_package(self, chat, key, epoch):
-        """Досылает недостающие шаги: PDF, затем ссылка. Состояние-ориентированно и идемпотентно:
+        """Досылает недостающие сообщения пакета. Состояние-ориентированно и идемпотентно:
         вызывается и после согласия, и при следующем сообщении, и по команде владельца.
+        Этапы прежние: PRESENTATION_SENT — выдано первое сообщение, INVITE_SENT — весь пакет.
         Возвращает True, если пакет выдан полностью."""
         version = self.cfg.conditions_version
         cand = self.db.candidate(chat)
         stage = cand['stage'] if cand else None
-        if stage == 'CONSENT_RECORDED':
-            # Проверка доступности PDF ДО отправки (фикс для test_B08)
-            if not self.cfg.presentation_file.is_file():
-                await self._step_problem(chat, key, 'презентация', 'FAILED', epoch)
+        if stage not in INCOMPLETE:
+            return stage == 'INVITE_SENT'
+        items = self._package()
+        # PRESENTATION_SENT: первое сообщение уже выдано, даже если ключа отправки нет
+        for n, item in enumerate(items[1:] if stage == 'PRESENTATION_SENT' else items):
+            document = item['file'] if item['type'] == 'document' else None
+            # Доступность файла проверяется ДО отправки (test_B08)
+            if document is not None and not document.is_file():
+                await self._step_problem(chat, key, item['name'], 'FAILED', epoch)
                 return False
-            status, _ = await self._step(chat, f'pdf:{chat}:{version}', PDF_CAPTION, epoch,
-                                         document=self.cfg.presentation_file)
+            text = item['caption'] if document is not None else item['text']
+            text = text.replace('{url}', self.cfg.group_invite_url)
+            status, _ = await self._step(chat, f"{item['id']}:{chat}:{version}", text, epoch, document=document)
             if status != 'SENT':
-                await self._step_problem(chat, key, 'презентация', status, epoch)
+                await self._step_problem(chat, key, item['name'], status, epoch)
                 return False
-            self._set_stage_safe(chat, 'PRESENTATION_SENT')
-            stage = self.db.candidate(chat)['stage']
-        if stage == 'PRESENTATION_SENT':
-            status, _ = await self._step(chat, f'inv:{chat}:{version}', self._invite_text(), epoch)
-            if status != 'SENT':
-                await self._step_problem(chat, key, 'приглашение', status, epoch)
-                return False
-            self._set_stage_safe(chat, 'INVITE_SENT')
-            stage = self.db.candidate(chat)['stage']
-        return stage == 'INVITE_SENT'
+            if stage == 'CONSENT_RECORDED' and n == 0:
+                self._set_stage_safe(chat, 'PRESENTATION_SENT')
+        if self.db.candidate(chat)['stage'] == 'CONSENT_RECORDED':
+            self._set_stage_safe(chat, 'PRESENTATION_SENT')   # пакет из одного сообщения
+        self._set_stage_safe(chat, 'INVITE_SENT')
+        return self.db.candidate(chat)['stage'] == 'INVITE_SENT'
 
     async def _complete_if_needed(self, chat, key):
         cand = self.db.candidate(chat)
@@ -488,12 +501,13 @@ class Engine:
             return
 
         if stage == 'NEW':
-            if is_vacancy_inquiry(text):
+            if is_vacancy_inquiry(text, self.cfg.vacancy_phrases):
                 await self._send_conditions(chat, key, epoch)
             return
 
         if stage == 'CONDITIONS_SENT':
-            consent, decline = is_explicit_consent(text), is_explicit_decline(text)
+            consent = is_explicit_consent(text, self.cfg.consent_phrases)
+            decline = is_explicit_decline(text, self.cfg.decline_phrases)
 
             if consent and not decline:
                 async with self.gate:
@@ -510,7 +524,8 @@ class Engine:
                 return
 
             if decline and not consent:
-                status, _ = await self._step(chat, f'dec:{chat}:{self.cfg.conditions_version}', DECLINE_TEXT, epoch)
+                status, _ = await self._step(chat, f'dec:{chat}:{self.cfg.conditions_version}',
+                                        self.cfg.decline_message_text, epoch)
                 if status == 'SENT':
                     self._set_stage_safe(chat, 'DECLINED')
                 else:
@@ -529,6 +544,8 @@ class Engine:
                 cand = self.db.candidate(chat)
                 if not cand or cand['stage'] != 'INVITE_SENT':
                     return
-            if '?' not in text and (is_explicit_consent(text) or is_vacancy_inquiry(text) or _is_pleasantry(text)):
+            if '?' not in text and (is_explicit_consent(text, self.cfg.consent_phrases)
+                                    or is_vacancy_inquiry(text, self.cfg.vacancy_phrases)
+                                    or _is_pleasantry(text)):
                 return
             await self._escalate(chat, text, f'сообщение после согласия (этап {stage})', key, epoch)
